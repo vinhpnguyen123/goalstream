@@ -1,0 +1,16 @@
+# Local development. Variables come from .env (copy .env.example first).
+-include .env
+export
+
+.PHONY: up down ps
+
+up: ## start postgres, redis, minio (all on 127.0.0.1), then create the buckets
+	docker compose up -d --wait postgres redis
+	docker compose up -d minio
+	docker compose run --rm minio-init
+
+down:
+	docker compose down
+
+ps:
+	docker compose ps
