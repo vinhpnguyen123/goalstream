@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/vinhpnguyen123/goalstream/internal/config"
 	"github.com/vinhpnguyen123/goalstream/internal/db"
 )
 
@@ -21,9 +22,13 @@ func run(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: ingest migrate")
 	}
+	cfg, err := config.Load(os.Getenv)
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
 	switch args[0] {
 	case "migrate":
-		return db.Migrate(os.Getenv("DATABASE_URL"))
+		return db.Migrate(cfg.DatabaseURL)
 	default:
 		return fmt.Errorf("unknown subcommand %q", args[0])
 	}
