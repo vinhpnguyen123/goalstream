@@ -1,0 +1,27 @@
+# dataset, media and derived files — NDA and size
+/data/
+/clips/
+/raw/
+/mezzanine/
+/testdata/
+/minio-data/
+/tags_todo.csv
+**/hls/**/*.ts
+**/hls/**/*.m3u8
+
+# secrets
+.env
+.env.*
+!.env.example
+
+# build
+/bin/
+/tmp/
+web/node_modules/
+web/dist/
+coverage.out
+
+# local
+.DS_Store
+.idea/
+.vscode/
