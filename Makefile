@@ -25,3 +25,7 @@ test:
 
 test-integration: ## needs `make up`. -p 1: packages share goalstream_test and the test bucket, so they must not run in parallel
 	go test -tags integration -count=1 -p 1 ./...
+
+.PHONY: fixtures
+fixtures: ## generate synthetic test media into testdata/ (never real footage)
+	scripts/fixtures.sh
