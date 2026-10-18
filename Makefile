@@ -14,3 +14,14 @@ down:
 
 ps:
 	docker compose ps
+
+.PHONY: migrate test test-integration
+
+migrate: ## apply pending migrations (the API also does this at startup)
+	go run ./cmd/ingest migrate
+
+test:
+	go test ./...
+
+test-integration: ## needs `make up`; runs against goalstream_test and the test bucket
+	go test -tags integration -count=1 ./...
