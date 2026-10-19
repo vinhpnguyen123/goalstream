@@ -34,7 +34,15 @@ func (s *Server) Routes() http.Handler {
 	})
 
 	r.Route("/api/v1", func(r chi.Router) {
-		r.Get("/healthz", s.healthz)
+		r.Get("/healthz", s.healthz) // exempt from the gate, like POST /gate
+		r.With(
+			middleware.RateLimit(s.Redis, middleware.RuleGate, byIP),
+			middleware.RateLimit(s.Redis, middleware.RuleGateGlobal, middleware.Global),
+		).Post("/gate", s.gate)
+
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.Gate(s.Cfg.API))
+		})
 	})
 	return r
 }

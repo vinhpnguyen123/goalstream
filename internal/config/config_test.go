@@ -67,6 +67,7 @@ func TestLoadErrors(t *testing.T) {
 		{"prod insecure cookie", map[string]string{"APP_ENV": "prod", "COOKIE_SECURE": "false"}, []string{"COOKIE_SECURE=false is refused"}},
 		{"test insecure cookie", map[string]string{"APP_ENV": "test", "COOKIE_SECURE": "false"}, []string{"COOKIE_SECURE=false is refused"}},
 		{"invite without code", map[string]string{"INVITE_CODES": "me:abc,friend"}, []string{"INVITE_CODES entry 2 must be id:code"}},
+		{"invite id with separator", map[string]string{"INVITE_CODES": "a|b:abc"}, []string{"must not contain |"}},
 		{"invite duplicate id", map[string]string{"INVITE_CODES": "me:abc,me:def"}, []string{`duplicate id "me"`}},
 	}
 	for _, tc := range cases {

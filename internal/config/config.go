@@ -237,6 +237,10 @@ func (p *parser) inviteCodes(key string) map[string]string {
 			p.errs = append(p.errs, fmt.Errorf("%s entry %d must be id:code", key, i+1))
 			continue
 		}
+		if strings.Contains(id, "|") {
+			p.errs = append(p.errs, fmt.Errorf("%s id %q must not contain |", key, id)) // the cookie's separator
+			continue
+		}
 		if _, dup := out[id]; dup {
 			p.errs = append(p.errs, fmt.Errorf("%s has duplicate id %q", key, id))
 		}
