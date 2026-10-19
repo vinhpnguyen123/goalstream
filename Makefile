@@ -29,3 +29,7 @@ test-integration: ## needs `make up`. -p 1: packages share goalstream_test and t
 .PHONY: fixtures
 fixtures: ## generate synthetic test media into testdata/ (never real footage)
 	scripts/fixtures.sh
+
+.PHONY: ingest
+ingest: ## cut clips from $(DATA_DIR)/matches into MinIO + Postgres, then write tags_todo.csv
+	go run ./cmd/ingest run
