@@ -6,8 +6,16 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/vinhpnguyen123/goalstream/internal/middleware"
 )
+
+// testServer has no database and a Redis nobody listens on: the default limiter fails open,
+// so routes that need neither still answer.
+func testServer() *Server {
+	return &Server{Redis: redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", MaxRetries: -1})}
+}
 
 type envelope struct {
 	Data      map[string]any `json:"data"`
@@ -31,7 +39,7 @@ func do(t *testing.T, h http.Handler, method, path string, mod ...func(*http.Req
 }
 
 func TestHealthzEnvelope(t *testing.T) {
-	h := (&Server{}).Routes()
+	h := testServer().Routes()
 	rec, env := do(t, h, "GET", "/api/v1/healthz", func(r *http.Request) {
 		r.Header.Set("X-Request-ID", "client-chosen")
 	})
@@ -45,7 +53,7 @@ func TestHealthzEnvelope(t *testing.T) {
 }
 
 func TestUnknownRouteIsNotFoundEnvelope(t *testing.T) {
-	h := (&Server{}).Routes()
+	h := testServer().Routes()
 	for _, tc := range []struct{ method, path string }{
 		{"GET", "/api/v1/nope"},
 		{"POST", "/api/v1/healthz"}, // wrong method: 404 too, the error set has no 405

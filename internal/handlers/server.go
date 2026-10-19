@@ -6,6 +6,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/vinhpnguyen123/goalstream/internal/config"
 	"github.com/vinhpnguyen123/goalstream/internal/httpx"
@@ -13,15 +14,18 @@ import (
 )
 
 type Server struct {
-	Pool *pgxpool.Pool
-	Cfg  config.Config
+	Pool  *pgxpool.Pool
+	Redis *redis.Client // rate limiter only in M1; it holds no truth
+	Cfg   config.Config
 }
 
 // Routes builds the router. Middleware order is docs/API.md § Middleware order; every route
 // lives under /api/v1.
 func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
-	r.Use(middleware.RequestID, middleware.Recover, middleware.LimitBody)
+	byIP := middleware.ByIP(s.Cfg.API.ClientIPHeader)
+	r.Use(middleware.RequestID, middleware.Recover, middleware.LimitBody,
+		middleware.RateLimit(s.Redis, middleware.RuleDefault, byIP))
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, http.StatusNotFound, "not_found", "not found")
 	})
