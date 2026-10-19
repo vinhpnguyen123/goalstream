@@ -63,12 +63,20 @@ func QC(p transcode.Probe, minMS int, decodeErr error) string {
 	return ""
 }
 
-// MezzanineCap is the -maxrate for the mezzanine (decision D15): never above the source
-// half's own bitrate, and never above the configured ceiling. A source that reports no
-// bitrate falls back to the ceiling alone.
-func MezzanineCap(sourceBps, ceilingBps int) int {
-	if sourceBps <= 0 {
+// MezzanineCap is the VIDEO -maxrate for the mezzanine (decision D15): the whole mezzanine
+// must not exceed the source half, so the video gets the source's TOTAL bitrate minus the
+// audio we add — capping video at the source total let 19 of 21 real clips land ~1% above
+// their source. Never above the configured ceiling. A source that reports no bitrate falls
+// back to the ceiling; the audio deduction never takes more than half (a sanity floor for
+// odd sources whose total is near the audio rate).
+//
+// The final 2% is headroom, measured on a real clip: x264's VBV overshoots -maxrate by
+// ~0.35% and MP4 container overhead adds ~0.3%; without it the mezzanine still landed 0.6%
+// above its source.
+func MezzanineCap(sourceTotalBps, ceilingBps int) int {
+	if sourceTotalBps <= 0 {
 		return ceilingBps
 	}
-	return min(sourceBps, ceilingBps)
+	video := max(sourceTotalBps-transcode.MezzAudioBps, sourceTotalBps/2)
+	return min(video*98/100, ceilingBps)
 }

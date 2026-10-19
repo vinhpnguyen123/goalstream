@@ -7,6 +7,10 @@ import (
 	"time"
 )
 
+// MezzAudioBps is the AAC bitrate of every mezzanine. The ingest video cap subtracts it from
+// the source total (D15), so the two must come from this one constant.
+const MezzAudioBps = 128_000
+
 // CutMezzanine re-encodes [startMS, startMS+durMS) of src into an MP4 mezzanine at dst.
 //
 // Re-encode, never stream-copy: `-c copy` snaps the cut to the nearest keyframe, which on
@@ -26,7 +30,7 @@ func CutMezzanine(ctx context.Context, src, dst string, startMS, durMS, crf, cap
 		"-c:v", "libx264", "-preset", "slow", "-crf", strconv.Itoa(crf),
 		"-maxrate", strconv.Itoa(capBps), "-bufsize", strconv.Itoa(2*capBps),
 		"-pix_fmt", "yuv420p", "-force_key_frames", "expr:gte(t,n_forced*2)",
-		"-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000",
+		"-c:a", "aac", "-b:a", strconv.Itoa(MezzAudioBps), "-ac", "2", "-ar", "48000",
 		"-movflags", "+faststart",
 		dst)
 	if err != nil {

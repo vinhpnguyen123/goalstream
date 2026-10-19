@@ -188,9 +188,10 @@ func TestQC(t *testing.T) {
 
 func TestMezzanineCap(t *testing.T) {
 	cases := []struct{ src, ceiling, want int }{
-		{2_824_198, 8_000_000, 2_824_198},  // real SoccerNet half: the source wins (D15)
+		{2_824_198, 8_000_000, 2_642_274},  // real SoccerNet half: (total − 128k audio) × 0.98 (D15)
 		{12_000_000, 8_000_000, 8_000_000}, // a heavy source: the ceiling wins
 		{0, 8_000_000, 8_000_000},          // bitrate not reported: ceiling alone
+		{200_000, 8_000_000, 98_000},       // tiny source: the audio deduction is floored at half
 	}
 	for _, tc := range cases {
 		if got := MezzanineCap(tc.src, tc.ceiling); got != tc.want {
