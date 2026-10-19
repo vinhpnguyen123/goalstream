@@ -34,3 +34,5 @@ jobs:
       - run: make test-integration
 
       - run: go build ./cmd/...
+      - name: build the api image Render deploys
+        run: docker build -q -t goalstream-api .

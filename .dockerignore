@@ -1,0 +1,15 @@
+# NDA media and annotations must never enter a build context, let alone an image.
+data/
+testdata/
+clips/
+raw/
+mezzanine/
+minio-data/
+tags_todo.csv
+.env
+.env.*
+.git/
+.github/
+.claude/
+docs/
+CLAUDE.md
