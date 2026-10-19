@@ -19,6 +19,20 @@ type Config struct {
 	RedisURL    string
 	S3          S3Config
 	Ingest      IngestConfig
+	API         APIConfig
+}
+
+// APIConfig is read by every binary but only cmd/api requires it: ValidateAPI.
+type APIConfig struct {
+	HTTPAddr       string
+	AuthMode       string // dev | closed (jwt arrives in M4)
+	DevUserEmail   string
+	CookieSecure   bool
+	GateEnabled    bool
+	InviteCodes    map[string]string // invite id → code; removing an id revokes its cookies
+	InviteSecret   string
+	InviteTTL      time.Duration
+	ClientIPHeader string // set only behind a proxy that overwrites it
 }
 
 type S3Config struct {
@@ -39,7 +53,7 @@ type IngestConfig struct {
 	PostRoll     time.Duration
 	MinClip      time.Duration
 	CRF          int
-	MaxRate      int // absolute ceiling, bits/sec; the effective cap is min(source, this) (D15)
+	MaxRate      int // absolute ceiling, bits/sec; the effective cap is MezzanineCap (D15)
 	CutTimeout   time.Duration
 	TagsTodoPath string
 }
@@ -73,13 +87,55 @@ func Load(getenv func(string) string) (Config, error) {
 			CutTimeout:   p.duration("INGEST_CUT_TIMEOUT", 5*time.Minute),
 			TagsTodoPath: p.str("TAGS_TODO_PATH", "./tags_todo.csv"),
 		},
+		API: APIConfig{
+			HTTPAddr:       p.str("HTTP_ADDR", ":8080"),
+			AuthMode:       p.str("AUTH_MODE", ""),
+			DevUserEmail:   strings.ToLower(p.str("DEV_USER_EMAIL", "dev@localhost")),
+			CookieSecure:   p.boolean("COOKIE_SECURE", true),
+			GateEnabled:    p.boolean("GATE_ENABLED", true),
+			InviteCodes:    p.inviteCodes("INVITE_CODES"),
+			InviteSecret:   p.str("INVITE_SECRET", ""),
+			InviteTTL:      p.duration("INVITE_TTL", 720*time.Hour),
+			ClientIPHeader: p.str("CLIENT_IP_HEADER", ""),
+		},
 	}
+	// Startup guards (CONVENTIONS.md): settings that are only safe on a laptop.
 	if c.AppEnv == "prod" {
 		if err := publicEndpointGuard(c.S3.PublicEndpoint); err != nil {
 			p.errs = append(p.errs, err)
 		}
+		if c.API.AuthMode == "dev" {
+			p.errs = append(p.errs, errors.New("AUTH_MODE=dev is refused in prod"))
+		}
+		if !c.API.GateEnabled {
+			p.errs = append(p.errs, errors.New("GATE_ENABLED=false is refused in prod"))
+		}
+	}
+	if c.AppEnv != "dev" && !c.API.CookieSecure {
+		p.errs = append(p.errs, errors.New("COOKIE_SECURE=false is refused outside APP_ENV=dev"))
 	}
 	return c, errors.Join(p.errs...)
+}
+
+// ValidateAPI checks what only the API needs, so ingest runs without gate secrets.
+func (c Config) ValidateAPI() error {
+	var errs []error
+	switch c.API.AuthMode {
+	case "dev", "closed":
+	case "":
+		errs = append(errs, errors.New("AUTH_MODE is required"))
+	default:
+		errs = append(errs, fmt.Errorf("AUTH_MODE must be dev or closed until M4, got %q", c.API.AuthMode))
+	}
+	if c.API.GateEnabled {
+		if len(c.API.InviteCodes) == 0 {
+			errs = append(errs, errors.New("INVITE_CODES is required when the gate is enabled"))
+		}
+		if len(c.API.InviteSecret) < 32 {
+			errs = append(errs, errors.New("INVITE_SECRET must be at least 32 bytes"))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // publicEndpointGuard rejects endpoints a browser on the internet cannot reach. A URL signed
@@ -169,6 +225,24 @@ func (p *parser) boolean(key string, def bool) bool {
 		p.errs = append(p.errs, fmt.Errorf("%s must be true or false, got %q", key, raw))
 	}
 	return b
+}
+
+// inviteCodes parses "id:code,id:code". Never echoes a code into an error message.
+func (p *parser) inviteCodes(key string) map[string]string {
+	out := map[string]string{}
+	for i, pair := range p.list(key, "") {
+		id, code, ok := strings.Cut(pair, ":")
+		id, code = strings.TrimSpace(id), strings.TrimSpace(code)
+		if !ok || id == "" || code == "" {
+			p.errs = append(p.errs, fmt.Errorf("%s entry %d must be id:code", key, i+1))
+			continue
+		}
+		if _, dup := out[id]; dup {
+			p.errs = append(p.errs, fmt.Errorf("%s has duplicate id %q", key, id))
+		}
+		out[id] = code
+	}
+	return out
 }
 
 func (p *parser) list(key, def string) []string {

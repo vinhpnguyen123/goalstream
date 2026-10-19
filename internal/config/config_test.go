@@ -61,6 +61,13 @@ func TestLoadErrors(t *testing.T) {
 			[]string{"not publicly reachable"}},
 		{"prod docker hostname", map[string]string{"APP_ENV": "prod", "S3_PUBLIC_ENDPOINT": "http://minio:9000"},
 			[]string{"not publicly reachable"}},
+		// test #13: settings only safe on a laptop make the process exit
+		{"prod dev auth", map[string]string{"APP_ENV": "prod", "AUTH_MODE": "dev"}, []string{"AUTH_MODE=dev is refused"}},
+		{"prod gate off", map[string]string{"APP_ENV": "prod", "GATE_ENABLED": "false"}, []string{"GATE_ENABLED=false is refused"}},
+		{"prod insecure cookie", map[string]string{"APP_ENV": "prod", "COOKIE_SECURE": "false"}, []string{"COOKIE_SECURE=false is refused"}},
+		{"test insecure cookie", map[string]string{"APP_ENV": "test", "COOKIE_SECURE": "false"}, []string{"COOKIE_SECURE=false is refused"}},
+		{"invite without code", map[string]string{"INVITE_CODES": "me:abc,friend"}, []string{"INVITE_CODES entry 2 must be id:code"}},
+		{"invite duplicate id", map[string]string{"INVITE_CODES": "me:abc,me:def"}, []string{`duplicate id "me"`}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -84,6 +91,56 @@ func TestProdAcceptsPublicEndpoint(t *testing.T) {
 	}))
 	if err != nil {
 		t.Fatalf("public R2 endpoint rejected: %v", err)
+	}
+}
+
+func TestDevAllowsInsecureCookie(t *testing.T) {
+	if _, err := Load(env(map[string]string{"COOKIE_SECURE": "false"})); err != nil {
+		t.Fatalf("dev must allow COOKIE_SECURE=false: %v", err)
+	}
+}
+
+func TestValidateAPI(t *testing.T) {
+	secret := strings.Repeat("s", 32)
+	cases := []struct {
+		name    string
+		env     map[string]string
+		wantErr string // "" = valid
+	}{
+		{"dev with gate", map[string]string{"AUTH_MODE": "dev", "INVITE_CODES": "me:abc", "INVITE_SECRET": secret}, ""},
+		{"closed, gate off", map[string]string{"AUTH_MODE": "closed", "GATE_ENABLED": "false"}, ""},
+		{"no auth mode", map[string]string{"GATE_ENABLED": "false"}, "AUTH_MODE is required"},
+		{"jwt before M4", map[string]string{"AUTH_MODE": "jwt", "GATE_ENABLED": "false"}, "dev or closed until M4"},
+		{"gate without codes", map[string]string{"AUTH_MODE": "dev", "INVITE_SECRET": secret}, "INVITE_CODES is required"},
+		{"short secret", map[string]string{"AUTH_MODE": "dev", "INVITE_CODES": "me:abc", "INVITE_SECRET": "short"}, "at least 32 bytes"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := Load(env(tc.env))
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = c.ValidateAPI()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("got %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestInviteCodesParsed(t *testing.T) {
+	c, err := Load(env(map[string]string{"INVITE_CODES": " me : abc , friend:x:y "}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.API.InviteCodes["me"] != "abc" || c.API.InviteCodes["friend"] != "x:y" {
+		t.Fatalf("codes: %v", c.API.InviteCodes)
 	}
 }
 
