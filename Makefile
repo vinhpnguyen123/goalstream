@@ -30,6 +30,12 @@ test-integration: ## needs `make up`. -p 1: packages share goalstream_test and t
 fixtures: ## generate synthetic test media into testdata/ (never real footage)
 	scripts/fixtures.sh
 
-.PHONY: ingest
+.PHONY: ingest ingest-tags reembed
 ingest: ## cut clips from $(DATA_DIR)/matches into MinIO + Postgres, then write tags_todo.csv
 	go run ./cmd/ingest run
+
+ingest-tags: ## apply the hand-filled $(TAGS_TODO_PATH) (tags separated by |), then rebuild embeddings
+	go run ./cmd/ingest tags
+
+reembed: ## rebuild every clip embedding from its columns + vocab
+	go run ./cmd/ingest reembed
