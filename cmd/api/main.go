@@ -18,6 +18,7 @@ import (
 	"github.com/vinhpnguyen123/goalstream/internal/config"
 	"github.com/vinhpnguyen123/goalstream/internal/db"
 	"github.com/vinhpnguyen123/goalstream/internal/handlers"
+	"github.com/vinhpnguyen123/goalstream/internal/storage"
 )
 
 const shutdownGrace = 15 * time.Second
@@ -68,7 +69,7 @@ func run(ctx context.Context) error {
 
 	srv := &http.Server{
 		Addr:              cfg.API.HTTPAddr,
-		Handler:           (&handlers.Server{Pool: pool, Redis: rdb, Cfg: cfg, DevUserID: devUserID}).Routes(),
+		Handler:           (&handlers.Server{Pool: pool, Redis: rdb, Store: storage.New(cfg.S3), Cfg: cfg, DevUserID: devUserID}).Routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,

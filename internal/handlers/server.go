@@ -11,11 +11,13 @@ import (
 	"github.com/vinhpnguyen123/goalstream/internal/config"
 	"github.com/vinhpnguyen123/goalstream/internal/httpx"
 	"github.com/vinhpnguyen123/goalstream/internal/middleware"
+	"github.com/vinhpnguyen123/goalstream/internal/storage"
 )
 
 type Server struct {
 	Pool  *pgxpool.Pool
 	Redis *redis.Client // rate limiter only in M1; it holds no truth
+	Store *storage.Client
 	Cfg   config.Config
 	// DevUserID is the AUTH_MODE=dev user, upserted at startup. Empty in any other mode.
 	DevUserID string
@@ -44,6 +46,9 @@ func (s *Server) Routes() http.Handler {
 
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Gate(s.Cfg.API), middleware.Auth(s.Cfg.API.AuthMode, s.DevUserID))
+			r.Get("/clips", s.listClips)
+			r.With(middleware.RateLimit(s.Redis, middleware.RulePlay, middleware.ByUser)).
+				Get("/clips/{id}/play", s.playClip)
 		})
 	})
 	return r
