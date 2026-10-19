@@ -7,10 +7,26 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// LockRebuild serializes everything that reads embedding inputs and writes embeddings
+// (tag loads, rebuilds; centroid rebuilds from M4). Take it FIRST in the transaction, before
+// any row is read or locked: a writer that locks clip rows and then waits for this lock
+// deadlocks against a rebuild holding it. Transaction-scoped, re-entrant within a session.
+func LockRebuild(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('rebuild:embeddings'))`); err != nil {
+		return fmt.Errorf("locking embedding rebuild: %w", err)
+	}
+	return nil
+}
+
 // ReembedAll recomputes every clip embedding from its columns + vocab (docs/SCHEMA.md
 // § Rebuilds). Run it inside the transaction that changed the inputs, so a reader never sees
 // new tags with an old vector. Centroid rebuilds join here when user_taste exists (M4).
 func ReembedAll(ctx context.Context, tx pgx.Tx) (int, error) {
+	// Without the lock, a rebuild that read old tags could commit after a tag load and
+	// overwrite its vectors with ones computed from the old tags.
+	if err := LockRebuild(ctx, tx); err != nil {
+		return 0, err
+	}
 	// LEFT JOINs + a NULL check instead of inner joins: a clip whose vocab row is missing must
 	// abort the rebuild, not silently keep its stale vector.
 	rows, err := tx.Query(ctx, `

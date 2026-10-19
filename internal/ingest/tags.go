@@ -26,30 +26,16 @@ import (
 // and are skipped; rows whose tags already match are no-ops, so re-loading a sheet is safe.
 // Returns how many clips changed.
 func LoadTags(ctx context.Context, pool *pgxpool.Pool, path string) (int, error) {
-	f, err := os.Open(path)
+	records, idCol, tagCol, err := readSheet(path)
 	if err != nil {
 		return 0, err
-	}
-	defer f.Close()
-	records, err := csv.NewReader(f).ReadAll()
-	if err != nil {
-		return 0, fmt.Errorf("reading %s: %w", path, err)
-	}
-	if len(records) == 0 {
-		return 0, fmt.Errorf("%s is empty", path)
-	}
-	col := map[string]int{}
-	for i, h := range records[0] {
-		col[strings.TrimSpace(h)] = i
-	}
-	idCol, ok1 := col["clip_id"]
-	tagCol, ok2 := col["tags"]
-	if !ok1 || !ok2 {
-		return 0, fmt.Errorf("%s: header must contain clip_id and tags", path)
 	}
 
 	changed := 0
 	err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		if err := recommend.LockRebuild(ctx, tx); err != nil { // before the FOR UPDATEs below
+			return err
+		}
 		known, err := vocab.TagSlots(ctx, tx)
 		if err != nil {
 			return err
@@ -94,6 +80,51 @@ func LoadTags(ctx context.Context, pool *pgxpool.Pool, path string) (int, error)
 	return changed, err
 }
 
+// readSheet reads a tags sheet and locates its clip_id and tags columns.
+func readSheet(path string) (records [][]string, idCol, tagCol int, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	defer f.Close()
+	records, err = csv.NewReader(f).ReadAll()
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("reading %s: %w", path, err)
+	}
+	if len(records) == 0 {
+		return nil, 0, 0, fmt.Errorf("%s is empty", path)
+	}
+	col := map[string]int{}
+	for i, h := range records[0] {
+		col[strings.TrimSpace(h)] = i
+	}
+	idCol, ok1 := col["clip_id"]
+	tagCol, ok2 := col["tags"]
+	if !ok1 || !ok2 {
+		return nil, 0, 0, fmt.Errorf("%s: header must contain clip_id and tags", path)
+	}
+	return records, idCol, tagCol, nil
+}
+
+// pendingTags returns the tag cells already filled in an existing sheet, by clip id: labels
+// typed by hand but not yet applied with `make ingest-tags`. No sheet → none.
+func pendingTags(path string) (map[string]string, error) {
+	records, idCol, tagCol, err := readSheet(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]string{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for _, rec := range records[1:] {
+		if cell := strings.TrimSpace(rec[tagCol]); cell != "" {
+			out[strings.TrimSpace(rec[idCol])] = cell
+		}
+	}
+	return out, nil
+}
+
 // parseTags splits "a | b|a" into sorted, de-duplicated tags, each of which must be in vocab.
 func parseTags(cell string, known map[string]int) ([]string, error) {
 	var out []string
@@ -111,9 +142,15 @@ func parseTags(cell string, known map[string]int) ([]string, error) {
 }
 
 // WriteTagsTodo regenerates the hand-labelling sheet from the database — every clip whose
-// tags are still empty — so re-runs never duplicate lines. Written to a temp file and renamed,
+// tags are still empty — so re-runs never duplicate lines. Tag cells already typed into the
+// existing sheet are carried over by clip id: a re-run of ingest must never erase labelling
+// work that has not been applied yet. A sheet that cannot be read is left untouched. Written to a temp file and renamed,
 // so an interrupted run never leaves a half-written sheet.
 func WriteTagsTodo(ctx context.Context, pool *pgxpool.Pool, path string) (int, error) {
+	pending, err := pendingTags(path)
+	if err != nil {
+		return 0, fmt.Errorf("keeping unapplied labels in %s (fix or move the file, then re-run): %w", path, err)
+	}
 	rows, err := pool.Query(ctx, `
 		SELECT id::text, title, match_minute, s3_prefix || 'original.mp4'
 		  FROM clips WHERE tags = '{}' ORDER BY created_at, id`)
@@ -132,7 +169,7 @@ func WriteTagsTodo(ctx context.Context, pool *pgxpool.Pool, path string) (int, e
 	var minute, n int
 	_, err = pgx.ForEachRow(rows, []any{&id, &title, &minute, &key}, func() error {
 		n++
-		return w.Write([]string{id, title, strconv.Itoa(minute), key, ""})
+		return w.Write([]string{id, title, strconv.Itoa(minute), key, pending[id]})
 	})
 	if err != nil {
 		tmp.Close()
