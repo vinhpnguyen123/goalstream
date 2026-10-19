@@ -51,3 +51,16 @@ func write(w http.ResponseWriter, status int, body any) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body) // the status is already sent; nothing left to report to
 }
+
+type userKey struct{}
+
+// WithUserID is set only by the auth middleware. Handlers read the caller from here, never
+// from the URL or the body.
+func WithUserID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, userKey{}, id)
+}
+
+func UserID(ctx context.Context) (string, bool) {
+	id, ok := ctx.Value(userKey{}).(string)
+	return id, ok && id != ""
+}

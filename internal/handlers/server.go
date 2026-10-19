@@ -17,6 +17,8 @@ type Server struct {
 	Pool  *pgxpool.Pool
 	Redis *redis.Client // rate limiter only in M1; it holds no truth
 	Cfg   config.Config
+	// DevUserID is the AUTH_MODE=dev user, upserted at startup. Empty in any other mode.
+	DevUserID string
 }
 
 // Routes builds the router. Middleware order is docs/API.md § Middleware order; every route
@@ -41,7 +43,7 @@ func (s *Server) Routes() http.Handler {
 		).Post("/gate", s.gate)
 
 		r.Group(func(r chi.Router) {
-			r.Use(middleware.Gate(s.Cfg.API))
+			r.Use(middleware.Gate(s.Cfg.API), middleware.Auth(s.Cfg.API.AuthMode, s.DevUserID))
 		})
 	})
 	return r

@@ -14,6 +14,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/vinhpnguyen123/goalstream/internal/auth"
 	"github.com/vinhpnguyen123/goalstream/internal/config"
 	"github.com/vinhpnguyen123/goalstream/internal/db"
 	"github.com/vinhpnguyen123/goalstream/internal/handlers"
@@ -52,6 +53,12 @@ func run(ctx context.Context) error {
 		return err
 	}
 	defer pool.Close()
+	var devUserID string
+	if cfg.API.AuthMode == "dev" {
+		if devUserID, err = auth.UpsertDevUser(ctx, pool, cfg.API.DevUserEmail); err != nil {
+			return err
+		}
+	}
 	ropt, err := redis.ParseURL(cfg.RedisURL)
 	if err != nil {
 		return fmt.Errorf("config: REDIS_URL: %w", err)
@@ -61,7 +68,7 @@ func run(ctx context.Context) error {
 
 	srv := &http.Server{
 		Addr:              cfg.API.HTTPAddr,
-		Handler:           (&handlers.Server{Pool: pool, Redis: rdb, Cfg: cfg}).Routes(),
+		Handler:           (&handlers.Server{Pool: pool, Redis: rdb, Cfg: cfg, DevUserID: devUserID}).Routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
