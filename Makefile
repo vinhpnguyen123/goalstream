@@ -30,9 +30,12 @@ test-integration: ## needs `make up`. -p 1: packages share goalstream_test and t
 fixtures: ## generate synthetic test media into testdata/ (never real footage)
 	scripts/fixtures.sh
 
-.PHONY: api
+.PHONY: api fe
 api: ## run the API (migrates first)
 	go run ./cmd/api
+
+fe: ## frontend dev server on :5173, proxies /api to the API (run `npm ci` in web/ once)
+	cd web && npm run dev
 
 .PHONY: ingest ingest-tags reembed
 ingest: ## cut clips from $(DATA_DIR)/matches into MinIO + Postgres, then write tags_todo.csv
