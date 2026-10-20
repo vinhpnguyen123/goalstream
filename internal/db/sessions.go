@@ -87,3 +87,16 @@ func SessionSummary(ctx context.Context, pool *pgxpool.Pool, id, userID string) 
 	}
 	return s, nil
 }
+
+// OwnsSession is ErrNotFound unless the session exists and belongs to userID.
+func OwnsSession(ctx context.Context, pool *pgxpool.Pool, id, userID string) error {
+	var ok bool
+	err := pool.QueryRow(ctx, `SELECT true FROM sessions WHERE id = $1 AND user_id = $2`, id, userID).Scan(&ok)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("reading session %s: %w", id, err)
+	}
+	return nil
+}

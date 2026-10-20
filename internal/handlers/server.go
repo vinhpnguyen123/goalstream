@@ -52,6 +52,7 @@ func (s *Server) Routes() http.Handler {
 			r.Post("/sessions", s.createSession)
 			r.Post("/sessions/{id}/end", s.endSession)
 			r.Get("/sessions/{id}/summary", s.sessionSummary)
+			r.Get("/sessions/{id}/next", s.nextClip)
 			r.Post("/feedback", s.postFeedback)
 		})
 	})
