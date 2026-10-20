@@ -6,6 +6,11 @@ import (
 	"context"
 	"os"
 	"testing"
+
+	"github.com/golang-migrate/migrate/v4"
+	"github.com/golang-migrate/migrate/v4/source/iofs"
+
+	"github.com/vinhpnguyen123/goalstream/migrations"
 )
 
 func testURL(t *testing.T) string {
@@ -59,5 +64,50 @@ func TestMigrateIsIdempotentAndSeedsTags(t *testing.T) {
 	if err == nil {
 		pool.Exec(ctx, `DELETE FROM vocab WHERE value='__overflow__'`)
 		t.Fatal("team slot 64 was accepted; vocab_slot_chk must reject it")
+	}
+}
+
+// Down to M1 and back up: the M2 tables go and return cleanly.
+func TestMigrateDownToM1AndUp(t *testing.T) {
+	ctx := context.Background()
+	url := testURL(t)
+	if err := Migrate(url); err != nil {
+		t.Fatal(err)
+	}
+	src, err := iofs.New(migrations.FS, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := migrate.NewWithSourceInstance("iofs", src, pgx5URL(url))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+
+	pool, err := Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	m2Tables := func() (n int) {
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*) FROM information_schema.tables
+			 WHERE table_schema='public' AND table_name IN ('sessions','feedback_events','seen_clips')`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+
+	if err := m.Migrate(1); err != nil {
+		t.Fatalf("down to 1: %v", err)
+	}
+	if n := m2Tables(); n != 0 {
+		t.Fatalf("after down: %d M2 tables remain", n)
+	}
+	if err := Migrate(url); err != nil {
+		t.Fatalf("up again: %v", err)
+	}
+	if n := m2Tables(); n != 3 {
+		t.Fatalf("after up: %d M2 tables, want 3", n)
 	}
 }
