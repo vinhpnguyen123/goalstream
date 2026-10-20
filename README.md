@@ -66,3 +66,51 @@ curl -b jar localhost:8080/api/v1/clips/<id>/play
 | Automated shot-type tagging (tags are hand-labelled) | a trustworthy vision model exists and the catalogue is too large to label by hand |
 | Branch protection (needs a paid plan on a private repo): "never merge red" is a rule | more than one person merges into `main` |
 | Embedding v2: v1 holds 64 teams; ingest aborts loudly when full | the catalogue grows past 64 scoring teams |
+
+### M2 — viewing UI (`m2-viewer`)
+
+**What it does.** A mobile-first React app: enter the invite code, start a session, watch a clip,
+rate it (loved / okay / not for me) or skip it, and get a summary at the end. Clips are picked at
+random among the ones you have not rated yet (the recommender arrives in M4). The frontend is
+deployed on Vercel; it reaches the API on Render through a same-origin `/api/*` rewrite.
+
+**How it works.**
+
+- *Sessions* (`POST /sessions`, `/end`, `/summary`): every lookup is `WHERE id AND user_id`, so
+  someone else's session is a 404, never a 403. Ending is a guarded UPDATE on `ended_at IS NULL`:
+  a second call is a no-op.
+- *Feedback* (`POST /feedback`, `internal/recommend/rate.go`): an append-only log, the current
+  rating is the latest row. **Idempotent by state** — the same response twice appends nothing, so
+  double taps and retries are harmless. Every rating change of one user is serialized by a lock
+  on the user's row taken first; without it, two concurrent requests both read "no rating yet" and
+  both append (a test proves it: 12–15 rows instead of 10 with the lock removed).
+- *seen_clips* is written by feedback, never by `/play`: being handed a URL is not watching.
+- *Next* (`GET /sessions/{id}/next?exclude=`): eligible = clips − seen − this session's skips.
+  Nothing left is `200 {clip:null, exhausted:true}`, not an error.
+- *Player* (`web/src/Player.tsx`, decisions in `playback.ts`): an expired presigned URL is
+  re-fetched and playback resumes where it was; a real failure retries `/play?format=mp4` once;
+  a second failure skips the clip silently. The skip list lives in the client, capped at 100.
+- *Same origin*: the browser only ever calls its own `/api/v1/*` (Vite proxy locally, Vercel
+  rewrite in production), so there is no CORS and the cookies stay first-party.
+
+**Run it locally.**
+
+```bash
+make up && make api              # shell 1
+cd web && npm ci && cd ..        # once
+make fe                          # shell 2 → http://localhost:5173, invite code from .env
+```
+
+**What I learned.** _(to write in my own words)_
+
+**What I chose not to build — and when that choice would be wrong.**
+
+| Not built | Would be wrong when |
+|---|---|
+| A server-side skip list: skips live in component state and vanish on reload | sessions span tabs or devices, or a reload must not resurface skipped clips |
+| Resumable sessions: a reload starts a new one | users routinely reload mid-session (flaky mobile networks) |
+| Playback telemetry beyond `watched_full` and `replay_count` | the recommender needs dwell time or drop-off points |
+| A scalable random pick: every eligible row is loaded and one is chosen in Go | the catalogue passes ~1000 clips (M4 moves selection into SQL) |
+| Browser end-to-end tests: only the player's decision logic is unit-tested | the UI flows change often, or more than one person ships frontend code |
+| Closing ended sessions to feedback: a retry may land after `/end` | a session bounds something real — a quota, billing, a time-boxed experiment |
+| Viewing in production: `AUTH_MODE=closed` until sign-in exists (M4) | — this is a staging step, not a trade-off |
