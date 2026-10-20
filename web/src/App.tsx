@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { ApiError, probe } from './api'
 import InviteScreen from './InviteScreen'
+import Session from './Session'
 
 type Gate = 'checking' | 'invite' | 'in' | 'error'
 
@@ -25,8 +26,7 @@ export default function App() {
           <button onClick={check} className="rounded-lg bg-neutral-800 px-4 py-2">Retry</button>
         </div>
       )}
-      {/* S5 replaces this with the viewing loop. */}
-      {gate === 'in' && <p className="p-4">Ready.</p>}
+      {gate === 'in' && <Session onGateLost={() => setGate('invite')} />}
     </div>
   )
 }
