@@ -49,6 +49,10 @@ func (s *Server) Routes() http.Handler {
 			r.Get("/clips", s.listClips)
 			r.With(middleware.RateLimit(s.Redis, middleware.RulePlay, middleware.ByUser)).
 				Get("/clips/{id}/play", s.playClip)
+			r.Post("/sessions", s.createSession)
+			r.Post("/sessions/{id}/end", s.endSession)
+			r.Get("/sessions/{id}/summary", s.sessionSummary)
+			r.Post("/feedback", s.postFeedback)
 		})
 	})
 	return r

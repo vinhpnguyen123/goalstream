@@ -56,6 +56,17 @@ func setupAPI(t *testing.T) apiEnv {
 	}
 	rdb := redis.NewClient(opt)
 	t.Cleanup(func() { rdb.Close() })
+	// Every test request comes from one TEST-NET address; without a fresh window, repeated
+	// runs (-count=3) hit the default 300/min limit and fail with 429.
+	keys, err := rdb.Keys(ctx, "rl:*:203.0.113.9:*").Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) > 0 {
+		if err := rdb.Del(ctx, keys...).Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
 	dev, err := auth.UpsertDevUser(ctx, pool, "dev@localhost")
 	if err != nil {
 		t.Fatal(err)
