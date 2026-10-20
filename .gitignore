@@ -9,6 +9,8 @@
 **/hls/**/*.ts
 **/hls/**/*.m3u8
 
+
+
 # secrets
 .env
 .env.*
@@ -25,3 +27,8 @@ coverage.out
 .DS_Store
 .idea/
 .vscode/
+
+# private planning docs and agent config — kept local, never pushed
+/docs/
+/CLAUDE.md
+/.claude/

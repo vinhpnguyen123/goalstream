@@ -1,0 +1,56 @@
+# Local stack. Every port is bound to 127.0.0.1 — never the LAN (NDA media). Credentials come
+# from .env, never from this file. 5442 because a host Postgres commonly occupies 5432/5433; 6380 because a host Redis commonly occupies 6379; 9010/9011
+# because an existing minio-local container occupies 9000/9001.
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set in .env}
+    ports: ["127.0.0.1:5442:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/local/pg-init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    ports: ["127.0.0.1:6380:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # MinIO stopped publishing community images in 2025 (Docker Hub repo gone, quay.io tags 401).
+  # Chainguard builds the same MinIO source; its free tier only serves :latest, so pin by digest.
+  # The image has no curl/wget, so there is no healthcheck: minio-init waits with `mc ready`.
+  minio:
+    image: cgr.dev/chainguard/minio@sha256:709099319add48dfb44aa596a7070d3ddd8dd04d7ae881765719aec29df9e510
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set in .env}
+    ports: ["127.0.0.1:9010:9000", "127.0.0.1:9011:9001"]
+    volumes: [miniodata:/data]
+
+  # One-shot: `make up` runs it after the long-lived services are up.
+  minio-init:
+    image: cgr.dev/chainguard/minio-client@sha256:0f20f9b9a9a06e2ada88afda965b824fd2d77793083b3b2b10186a9502c836f4
+    profiles: ["init"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      S3_BUCKET: ${S3_BUCKET:?set in .env}
+      S3_TEST_BUCKET: ${S3_TEST_BUCKET:?set in .env}
+    volumes: ["./deploy/local/minio-init.sh:/minio-init.sh:ro"]
+    entrypoint: ["/bin/sh", "/minio-init.sh"]
+
+volumes:
+  pgdata:
+  miniodata:
