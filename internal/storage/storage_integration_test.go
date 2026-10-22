@@ -136,8 +136,8 @@ func TestObjectsAreNotPublic(t *testing.T) {
 	}
 }
 
-// Open reads through the internal client — the M3 stream handler's only way to the bytes.
-func TestOpenWholeRangedAndMissing(t *testing.T) {
+// Open and Size read through the internal client — the M3 stream handler's only way to the bytes.
+func TestOpenSizeAndMissing(t *testing.T) {
 	ctx := context.Background()
 	cfg := storagetest.Config(t)
 	c := storage.New(cfg.S3)
@@ -168,5 +168,11 @@ func TestOpenWholeRangedAndMissing(t *testing.T) {
 	}
 	if _, err := c.Open(ctx, "clips/missing/original.mp4", ""); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("missing key: %v, want ErrNotFound", err)
+	}
+	if n, err := c.Size(ctx, "clips/o/original.mp4"); err != nil || n != int64(len(body)) {
+		t.Fatalf("Size = %d, %v; want %d", n, err, len(body))
+	}
+	if _, err := c.Size(ctx, "clips/missing/original.mp4"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("Size of missing key: %v, want ErrNotFound", err)
 	}
 }

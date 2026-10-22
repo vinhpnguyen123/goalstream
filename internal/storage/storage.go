@@ -23,6 +23,7 @@ import (
 const (
 	putTimeout  = 5 * time.Minute
 	getTimeout  = 5 * time.Minute
+	headTimeout = 10 * time.Second
 	listTimeout = 30 * time.Second
 )
 
@@ -84,6 +85,21 @@ func (c *Client) PutFile(ctx context.Context, key, path, contentType string) err
 		return fmt.Errorf("uploading %s: %w", key, err)
 	}
 	return nil
+}
+
+// Size HEADs key and returns its length in bytes, without reading the body.
+func (c *Client) Size(ctx context.Context, key string) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, headTimeout)
+	defer cancel()
+	out, err := c.s3.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(c.bucket), Key: aws.String(key)})
+	if err != nil {
+		var nf *types.NotFound // HEAD has no body, so a missing key is NotFound, not NoSuchKey
+		if errors.As(err, &nf) {
+			return 0, fmt.Errorf("sizing %s: %w", key, ErrNotFound)
+		}
+		return 0, fmt.Errorf("sizing %s: %w", key, err)
+	}
+	return aws.ToInt64(out.ContentLength), nil
 }
 
 // Open GETs key: the whole object when rng is "", else rng as an HTTP Range ("bytes=N-M").
