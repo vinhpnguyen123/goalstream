@@ -27,6 +27,7 @@ func jwtAPI(t *testing.T) apiEnv {
 	e.s.Cfg.API.JWTSecret = testJWTSecret
 	e.s.Cfg.API.AccessTokenTTL = 15 * time.Minute
 	e.s.Cfg.API.RefreshTokenTTL = 168 * time.Hour
+	e.s.Cfg.API.RefreshReuseGrace = 30 * time.Second
 	e.s.Signer = auth.NewSigner(testJWTSecret, 15*time.Minute)
 	// Fresh windows for the auth rules: register counts per HOUR, so without this a re-run
 	// (-count=3) inside the hour is rate-limited by the previous one.

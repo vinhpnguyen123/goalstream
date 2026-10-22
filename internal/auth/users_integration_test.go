@@ -94,3 +94,32 @@ func TestRegisterStoresHashAndAudits(t *testing.T) {
 		t.Fatalf("second registration: %v, want ErrEmailTaken", err)
 	}
 }
+
+func TestPruneRefresh(t *testing.T) {
+	ctx := context.Background()
+	pool := testPool(t)
+	u, err := Register(ctx, pool, "me@x.com", "correct horse battery", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for tok, expires := range map[string]string{
+		"old":     "now() - interval '2 days'", // expired > 1 day → pruned
+		"recent":  "now() - interval '1 hour'", // expired < 1 day → kept
+		"current": "now() + interval '7 days'", // active → kept
+	} {
+		if _, err := pool.Exec(ctx, `INSERT INTO refresh_tokens (user_id, token_hash, family_id, expires_at)
+			VALUES ($1, $2, gen_random_uuid(), `+expires+`)`, u.ID, HashRefresh(tok)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := PruneRefresh(ctx, pool)
+	if err != nil || n != 1 {
+		t.Fatalf("PruneRefresh = %d, %v; want 1", n, err)
+	}
+	var left int
+	pool.QueryRow(ctx, `SELECT count(*) FROM refresh_tokens WHERE token_hash IN ($1, $2)`,
+		HashRefresh("recent"), HashRefresh("current")).Scan(&left)
+	if left != 2 {
+		t.Fatalf("%d of the two kept tokens remain", left)
+	}
+}

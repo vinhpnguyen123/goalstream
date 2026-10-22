@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/vinhpnguyen123/goalstream/internal/auth"
@@ -21,7 +22,11 @@ import (
 	"github.com/vinhpnguyen123/goalstream/internal/storage"
 )
 
-const shutdownGrace = 15 * time.Second
+const (
+	shutdownGrace = 15 * time.Second
+	pruneEvery    = time.Hour
+	pruneTimeout  = 30 * time.Second
+)
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -81,6 +86,9 @@ func run(ctx context.Context) error {
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
+	if cfg.API.AuthMode == "jwt" {
+		go pruneLoop(ctx, pool)
+	}
 	slog.Info("api listening", "addr", cfg.API.HTTPAddr, "app_env", cfg.AppEnv, "auth_mode", cfg.API.AuthMode,
 		"gate_enabled", cfg.API.GateEnabled)
 
@@ -96,4 +104,26 @@ func run(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// pruneLoop deletes refresh tokens expired for more than a day, hourly, until shutdown. A
+// failed run is logged and retried on the next tick: stale rows are inert, not urgent.
+func pruneLoop(ctx context.Context, pool *pgxpool.Pool) {
+	t := time.NewTicker(pruneEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		pctx, cancel := context.WithTimeout(ctx, pruneTimeout)
+		n, err := auth.PruneRefresh(pctx, pool)
+		cancel()
+		if err != nil {
+			slog.Error("pruning refresh tokens", "err", err)
+			continue
+		}
+		slog.Info("pruned refresh tokens", "deleted", n)
+	}
 }

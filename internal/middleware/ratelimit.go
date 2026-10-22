@@ -30,6 +30,7 @@ var (
 	RuleLogin      = Rule{"login", 10, time.Minute, true}
 	RuleLoginEmail = Rule{"login_email", 5, time.Minute, true} // keyed after decode: Allow
 	RuleRegister   = Rule{"register", 5, time.Hour, true}
+	RuleRefresh    = Rule{"refresh", 30, time.Minute, true}
 )
 
 // storeTimeout bounds every Redis call: a slow limiter must not become a slow API.

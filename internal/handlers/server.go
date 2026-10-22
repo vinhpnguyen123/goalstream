@@ -56,6 +56,8 @@ func (s *Server) Routes() http.Handler {
 				r.Use(middleware.Gate(s.Cfg.API))
 				r.With(middleware.RateLimit(s.Redis, middleware.RuleRegister, byIP)).Post("/auth/register", s.register)
 				r.With(middleware.RateLimit(s.Redis, middleware.RuleLogin, byIP)).Post("/auth/login", s.login)
+				r.With(middleware.RateLimit(s.Redis, middleware.RuleRefresh, byIP)).Post("/auth/refresh", s.refresh)
+				r.Post("/auth/logout", s.logout)
 			})
 		}
 

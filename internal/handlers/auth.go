@@ -90,17 +90,64 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, r, http.StatusOK, map[string]any{"access_token": access, "expires_in": expiresIn})
 }
 
-// setRefreshCookie writes gs_refresh (docs/API.md § Cookies). SameSite=Strict works because
+// setRefreshCookie writes gs_refresh (docs/API.md § Cookies); a negative ttl clears it. SameSite=Strict works because
 // the browser only ever talks to one site: the frontend proxies /api/*. Path scopes it to the
 // auth endpoints, so it never rides along on ordinary API calls. Never a Domain: host-only.
 func (s *Server) setRefreshCookie(w http.ResponseWriter, value string, ttl time.Duration) {
+	maxAge := int(ttl / time.Second)
+	if ttl < 0 {
+		maxAge = -1 // net/http: negative → "Max-Age=0", delete now (0 would mean a session cookie)
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     auth.RefreshCookie,
 		Value:    value,
 		Path:     "/api/v1/auth",
-		MaxAge:   int(ttl / time.Second),
+		MaxAge:   maxAge,
 		HttpOnly: true,
 		Secure:   s.Cfg.API.CookieSecure,
 		SameSite: http.SameSiteStrictMode,
 	})
+}
+
+// refresh is POST /auth/refresh: cookie only, no body. Success rotates the cookie and returns a
+// new access token; every refusal is 401 and clears the cookie (auth.Rotate decides).
+func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
+	ck, err := r.Cookie(auth.RefreshCookie)
+	if err != nil {
+		s.refuseRefresh(w, r)
+		return
+	}
+	user, next, err := auth.Rotate(r.Context(), s.Pool, ck.Value, s.Cfg.API.RefreshTokenTTL, s.Cfg.API.RefreshReuseGrace)
+	if errors.Is(err, auth.ErrRefreshInvalid) {
+		s.refuseRefresh(w, r)
+		return
+	} else if err != nil {
+		httpx.Internal(w, r, err)
+		return
+	}
+	access, expiresIn, err := s.Signer.Issue(user, time.Now())
+	if err != nil {
+		httpx.Internal(w, r, err)
+		return
+	}
+	s.setRefreshCookie(w, next, s.Cfg.API.RefreshTokenTTL)
+	httpx.JSON(w, r, http.StatusOK, map[string]any{"access_token": access, "expires_in": expiresIn})
+}
+
+func (s *Server) refuseRefresh(w http.ResponseWriter, r *http.Request) {
+	s.setRefreshCookie(w, "", -1)
+	httpx.Error(w, r, http.StatusUnauthorized, "unauthorized", "please sign in again")
+}
+
+// logout is POST /auth/logout: revoke the cookie's whole family and clear it. Always 204 —
+// no cookie, or an unknown one, is already logged out.
+func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+	if ck, err := r.Cookie(auth.RefreshCookie); err == nil {
+		if err := auth.Logout(r.Context(), s.Pool, ck.Value); err != nil {
+			httpx.Internal(w, r, err)
+			return
+		}
+	}
+	s.setRefreshCookie(w, "", -1)
+	w.WriteHeader(http.StatusNoContent)
 }
