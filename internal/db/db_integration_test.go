@@ -5,6 +5,7 @@ package db
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/golang-migrate/migrate/v4"
@@ -67,7 +68,7 @@ func TestMigrateIsIdempotentAndSeedsTags(t *testing.T) {
 	}
 }
 
-// Down to M1 and back up: the M2 tables go and return cleanly.
+// Down to M1 and back up: the M2 and M4 tables go and return cleanly.
 func TestMigrateDownToM1AndUp(t *testing.T) {
 	ctx := context.Background()
 	url := testURL(t)
@@ -89,10 +90,11 @@ func TestMigrateDownToM1AndUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	m2Tables := func() (n int) {
+	laterTables := func() (n int) {
 		if err := pool.QueryRow(ctx, `
 			SELECT count(*) FROM information_schema.tables
-			 WHERE table_schema='public' AND table_name IN ('sessions','feedback_events','seen_clips')`).Scan(&n); err != nil {
+			 WHERE table_schema='public' AND table_name IN
+			       ('sessions','feedback_events','seen_clips','refresh_tokens','user_taste')`).Scan(&n); err != nil {
 			t.Fatal(err)
 		}
 		return n
@@ -101,13 +103,60 @@ func TestMigrateDownToM1AndUp(t *testing.T) {
 	if err := m.Migrate(1); err != nil {
 		t.Fatalf("down to 1: %v", err)
 	}
-	if n := m2Tables(); n != 0 {
-		t.Fatalf("after down: %d M2 tables remain", n)
+	if n := laterTables(); n != 0 {
+		t.Fatalf("after down: %d M2/M4 tables remain", n)
 	}
 	if err := Migrate(url); err != nil {
 		t.Fatalf("up again: %v", err)
 	}
-	if n := m2Tables(); n != 3 {
-		t.Fatalf("after up: %d M2 tables, want 3", n)
+	if n := laterTables(); n != 5 {
+		t.Fatalf("after up: %d M2/M4 tables, want 5", n)
+	}
+}
+
+// The M4 CHECKs make illegal states unrepresentable: a centroid exists iff its count is > 0,
+// and a token is revoked with a reason or not at all.
+func TestM4Checks(t *testing.T) {
+	ctx := context.Background()
+	url := testURL(t)
+	if err := Migrate(url); err != nil {
+		t.Fatal(err)
+	}
+	pool, err := Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if _, err := pool.Exec(ctx, `TRUNCATE users CASCADE`); err != nil {
+		t.Fatal(err)
+	}
+	var user string
+	if err := pool.QueryRow(ctx, `INSERT INTO users (email, password_hash) VALUES ('c@x', '!') RETURNING id`).Scan(&user); err != nil {
+		t.Fatal(err)
+	}
+	vec := "[" + strings.TrimSuffix(strings.Repeat("0.1,", 128), ",") + "]"
+	for name, c := range map[string]struct {
+		sql  string
+		args []any
+	}{
+		"liked without centroid":    {`INSERT INTO user_taste (user_id, liked_count) VALUES ($1, 1)`, []any{user}},
+		"centroid without likes":    {`INSERT INTO user_taste (user_id, positive_centroid) VALUES ($1, $2::vector)`, []any{user, vec}},
+		"disliked without centroid": {`INSERT INTO user_taste (user_id, disliked_count) VALUES ($1, 1)`, []any{user}},
+		"revoked without reason": {`INSERT INTO refresh_tokens (user_id, token_hash, family_id, expires_at, revoked_at)
+			VALUES ($1, 'h1', gen_random_uuid(), now(), now())`, []any{user}},
+		"unknown revoke reason": {`INSERT INTO refresh_tokens (user_id, token_hash, family_id, expires_at, revoked_at, revoked_reason)
+			VALUES ($1, 'h2', gen_random_uuid(), now(), now(), 'expired')`, []any{user}},
+	} {
+		if _, err := pool.Exec(ctx, c.sql, c.args...); err == nil {
+			t.Errorf("%s: accepted, want a CHECK violation", name)
+		}
+	}
+	// The legal shapes go in.
+	if _, err := pool.Exec(ctx, `INSERT INTO user_taste (user_id, positive_centroid, liked_count) VALUES ($1, $2::vector, 1)`, user, vec); err != nil {
+		t.Errorf("legal taste row: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO refresh_tokens (user_id, token_hash, family_id, expires_at, revoked_at, revoked_reason)
+		VALUES ($1, 'h3', gen_random_uuid(), now(), now(), 'rotated')`, user); err != nil {
+		t.Errorf("legal revoked token: %v", err)
 	}
 }

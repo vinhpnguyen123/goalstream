@@ -24,15 +24,21 @@ type Config struct {
 
 // APIConfig is read by every binary but only cmd/api requires it: ValidateAPI.
 type APIConfig struct {
-	HTTPAddr       string
-	AuthMode       string // dev | closed (jwt arrives in M4)
-	DevUserEmail   string
-	CookieSecure   bool
-	GateEnabled    bool
-	InviteCodes    map[string]string // invite id → code; removing an id revokes its cookies
-	InviteSecret   string
-	InviteTTL      time.Duration
-	ClientIPHeader string // set only behind a proxy that overwrites it
+	HTTPAddr     string
+	AuthMode     string // dev | closed | jwt
+	DevUserEmail string
+	// AUTH_MODE=jwt only. Access tokens are verified with no leeway: one process signs and
+	// verifies them, so there is no clock skew to absorb.
+	JWTSecret         string
+	AccessTokenTTL    time.Duration
+	RefreshTokenTTL   time.Duration
+	RefreshReuseGrace time.Duration // a rotated token replayed within this is a tab race, not theft
+	CookieSecure      bool
+	GateEnabled       bool
+	InviteCodes       map[string]string // invite id → code; removing an id revokes its cookies
+	InviteSecret      string
+	InviteTTL         time.Duration
+	ClientIPHeader    string // set only behind a proxy that overwrites it
 }
 
 type S3Config struct {
@@ -88,15 +94,19 @@ func Load(getenv func(string) string) (Config, error) {
 			TagsTodoPath: p.str("TAGS_TODO_PATH", "./tags_todo.csv"),
 		},
 		API: APIConfig{
-			HTTPAddr:       p.str("HTTP_ADDR", ":8080"),
-			AuthMode:       p.str("AUTH_MODE", ""),
-			DevUserEmail:   strings.ToLower(p.str("DEV_USER_EMAIL", "dev@localhost")),
-			CookieSecure:   p.boolean("COOKIE_SECURE", true),
-			GateEnabled:    p.boolean("GATE_ENABLED", true),
-			InviteCodes:    p.inviteCodes("INVITE_CODES"),
-			InviteSecret:   p.str("INVITE_SECRET", ""),
-			InviteTTL:      p.duration("INVITE_TTL", 720*time.Hour),
-			ClientIPHeader: p.str("CLIENT_IP_HEADER", ""),
+			HTTPAddr:          p.str("HTTP_ADDR", ":8080"),
+			AuthMode:          p.str("AUTH_MODE", ""),
+			DevUserEmail:      strings.ToLower(p.str("DEV_USER_EMAIL", "dev@localhost")),
+			JWTSecret:         p.str("JWT_SECRET", ""),
+			AccessTokenTTL:    p.duration("ACCESS_TOKEN_TTL", 15*time.Minute),
+			RefreshTokenTTL:   p.duration("REFRESH_TOKEN_TTL", 168*time.Hour),
+			RefreshReuseGrace: p.duration("REFRESH_REUSE_GRACE", 30*time.Second),
+			CookieSecure:      p.boolean("COOKIE_SECURE", true),
+			GateEnabled:       p.boolean("GATE_ENABLED", true),
+			InviteCodes:       p.inviteCodes("INVITE_CODES"),
+			InviteSecret:      p.str("INVITE_SECRET", ""),
+			InviteTTL:         p.duration("INVITE_TTL", 720*time.Hour),
+			ClientIPHeader:    p.str("CLIENT_IP_HEADER", ""),
 		},
 	}
 	// Startup guards (CONVENTIONS.md): settings that are only safe on a laptop.
@@ -122,10 +132,14 @@ func (c Config) ValidateAPI() error {
 	var errs []error
 	switch c.API.AuthMode {
 	case "dev", "closed":
+	case "jwt":
+		if len(c.API.JWTSecret) < 32 {
+			errs = append(errs, errors.New("JWT_SECRET must be at least 32 bytes when AUTH_MODE=jwt"))
+		}
 	case "":
 		errs = append(errs, errors.New("AUTH_MODE is required"))
 	default:
-		errs = append(errs, fmt.Errorf("AUTH_MODE must be dev or closed until M4, got %q", c.API.AuthMode))
+		errs = append(errs, fmt.Errorf("AUTH_MODE must be dev, closed or jwt, got %q", c.API.AuthMode))
 	}
 	if c.API.GateEnabled {
 		if len(c.API.InviteCodes) == 0 {

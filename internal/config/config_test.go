@@ -39,6 +39,10 @@ func TestLoadDefaults(t *testing.T) {
 	if len(c.Ingest.Labels) != 1 || c.Ingest.Labels[0] != "Goal" {
 		t.Fatalf("labels default wrong: %v", c.Ingest.Labels)
 	}
+	if c.API.AccessTokenTTL != 15*time.Minute || c.API.RefreshTokenTTL != 168*time.Hour ||
+		c.API.RefreshReuseGrace != 30*time.Second {
+		t.Fatalf("token defaults wrong: %+v", c.API)
+	}
 }
 
 func TestLoadErrors(t *testing.T) {
@@ -111,7 +115,10 @@ func TestValidateAPI(t *testing.T) {
 		{"dev with gate", map[string]string{"AUTH_MODE": "dev", "INVITE_CODES": "me:abc", "INVITE_SECRET": secret}, ""},
 		{"closed, gate off", map[string]string{"AUTH_MODE": "closed", "GATE_ENABLED": "false"}, ""},
 		{"no auth mode", map[string]string{"GATE_ENABLED": "false"}, "AUTH_MODE is required"},
-		{"jwt before M4", map[string]string{"AUTH_MODE": "jwt", "GATE_ENABLED": "false"}, "dev or closed until M4"},
+		{"jwt without secret", map[string]string{"AUTH_MODE": "jwt", "GATE_ENABLED": "false"}, "JWT_SECRET must be at least 32 bytes"},
+		{"jwt short secret", map[string]string{"AUTH_MODE": "jwt", "GATE_ENABLED": "false", "JWT_SECRET": strings.Repeat("s", 31)}, "JWT_SECRET must be at least 32 bytes"},
+		{"jwt", map[string]string{"AUTH_MODE": "jwt", "GATE_ENABLED": "false", "JWT_SECRET": secret}, ""},
+		{"unknown auth mode", map[string]string{"AUTH_MODE": "basic", "GATE_ENABLED": "false"}, "dev, closed or jwt"},
 		{"gate without codes", map[string]string{"AUTH_MODE": "dev", "INVITE_SECRET": secret}, "INVITE_CODES is required"},
 		{"short secret", map[string]string{"AUTH_MODE": "dev", "INVITE_CODES": "me:abc", "INVITE_SECRET": "short"}, "at least 32 bytes"},
 	}
