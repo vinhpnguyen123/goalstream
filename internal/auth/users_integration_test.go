@@ -123,3 +123,27 @@ func TestPruneRefresh(t *testing.T) {
 		t.Fatalf("%d of the two kept tokens remain", left)
 	}
 }
+
+func TestSetAdmin(t *testing.T) {
+	ctx := context.Background()
+	pool := testPool(t)
+	if _, err := Register(ctx, pool, "me@x.com", "correct horse battery", nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name        string
+		admin, want bool
+	}{
+		{"grant", true, true},
+		{"grant again", true, false},
+		{"revoke", false, true},
+		{"revoke again", false, false},
+	} {
+		if changed, err := SetAdmin(ctx, pool, "me@x.com", c.admin); err != nil || changed != c.want {
+			t.Errorf("%s: changed=%v, %v; want %v", c.name, changed, err, c.want)
+		}
+	}
+	if _, err := SetAdmin(ctx, pool, "nobody@x.com", true); !errors.Is(err, db.ErrNotFound) {
+		t.Fatalf("unknown email: %v, want db.ErrNotFound", err)
+	}
+}

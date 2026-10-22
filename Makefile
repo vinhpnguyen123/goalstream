@@ -46,3 +46,7 @@ ingest-tags: ## apply the hand-filled $(TAGS_TODO_PATH) (tags separated by |), t
 
 reembed: ## rebuild every clip embedding from its columns + vocab
 	go run ./cmd/ingest reembed
+
+.PHONY: admin
+admin: ## grant is_admin: make admin EMAIL=me@x.com   (REVOKE=1 to demote)
+	go run ./cmd/ingest admin -email "$(EMAIL)" $(if $(REVOKE),-revoke)

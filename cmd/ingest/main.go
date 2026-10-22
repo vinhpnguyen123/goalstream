@@ -5,10 +5,14 @@
 //	                 already ingested), then regenerate $TAGS_TODO_PATH
 //	ingest tags      apply the hand-filled $TAGS_TODO_PATH, then rebuild every embedding
 //	ingest reembed   rebuild every embedding (after a vocab or layout change)
+//	ingest admin -email <email> [-revoke]
+//	                 grant (or revoke) users.is_admin — the only way it changes
 package main
 
 import (
 	"context"
+	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"os"
@@ -18,6 +22,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/vinhpnguyen123/goalstream/internal/auth"
 	"github.com/vinhpnguyen123/goalstream/internal/config"
 	"github.com/vinhpnguyen123/goalstream/internal/db"
 	"github.com/vinhpnguyen123/goalstream/internal/ingest"
@@ -37,7 +42,7 @@ func main() {
 
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: ingest migrate|run|tags|reembed")
+		return fmt.Errorf("usage: ingest migrate|run|tags|reembed|admin")
 	}
 	cfg, err := config.Load(os.Getenv)
 	if err != nil {
@@ -50,6 +55,8 @@ func run(ctx context.Context, args []string) error {
 		return runIngest(ctx, cfg)
 	case "tags", "reembed":
 		return rebuild(ctx, cfg, args[0])
+	case "admin":
+		return setAdmin(ctx, cfg, args[1:])
 	default:
 		return fmt.Errorf("unknown subcommand %q", args[0])
 	}
@@ -129,4 +136,36 @@ func printSummary(s ingest.Summary) {
 	for _, r := range reasons {
 		fmt.Printf("rejected          %-22s %d\n", r, s.Rejected[r])
 	}
+}
+
+// setAdmin is `make admin EMAIL=… [REVOKE=1]`. The change shows on the user's next request:
+// the API reads is_admin from Postgres every time.
+func setAdmin(ctx context.Context, cfg config.Config, args []string) error {
+	fs := flag.NewFlagSet("admin", flag.ContinueOnError)
+	raw := fs.String("email", "", "the user's email")
+	revoke := fs.Bool("revoke", false, "revoke instead of grant")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	email, ok := auth.NormalizeEmail(*raw)
+	if !ok {
+		return fmt.Errorf("admin: -email must be a valid email, got %q", *raw)
+	}
+	pool, err := db.Connect(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	changed, err := auth.SetAdmin(ctx, pool, email, !*revoke)
+	if errors.Is(err, db.ErrNotFound) {
+		return fmt.Errorf("admin: no user with email %s (register first)", email)
+	} else if err != nil {
+		return err
+	}
+	state := map[bool]string{false: "is now admin", true: "is no longer admin"}[*revoke]
+	if !changed {
+		state = map[bool]string{false: "was already admin", true: "was already not admin"}[*revoke]
+	}
+	fmt.Println(email, state)
+	return nil
 }
