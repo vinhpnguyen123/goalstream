@@ -4,13 +4,16 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 
 	"github.com/vinhpnguyen123/goalstream/internal/config"
 )
@@ -19,8 +22,12 @@ import (
 // because a mezzanine is tens of MB and R2 is across the internet.
 const (
 	putTimeout  = 5 * time.Minute
+	getTimeout  = 5 * time.Minute
+	headTimeout = 10 * time.Second
 	listTimeout = 30 * time.Second
 )
+
+var ErrNotFound = errors.New("storage: object not found")
 
 type Client struct {
 	s3      *s3.Client        // internal endpoint: every read and write
@@ -78,6 +85,54 @@ func (c *Client) PutFile(ctx context.Context, key, path, contentType string) err
 		return fmt.Errorf("uploading %s: %w", key, err)
 	}
 	return nil
+}
+
+// Size HEADs key and returns its length in bytes, without reading the body.
+func (c *Client) Size(ctx context.Context, key string) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, headTimeout)
+	defer cancel()
+	out, err := c.s3.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(c.bucket), Key: aws.String(key)})
+	if err != nil {
+		var nf *types.NotFound // HEAD has no body, so a missing key is NotFound, not NoSuchKey
+		if errors.As(err, &nf) {
+			return 0, fmt.Errorf("sizing %s: %w", key, ErrNotFound)
+		}
+		return 0, fmt.Errorf("sizing %s: %w", key, err)
+	}
+	return aws.ToInt64(out.ContentLength), nil
+}
+
+// Open GETs key: the whole object when rng is "", else rng as an HTTP Range ("bytes=N-M").
+// The timeout lives until Close, so the caller must Close. Only the dev-only M3 stream
+// handler reads media through the API; everything else presigns.
+func (c *Client) Open(ctx context.Context, key, rng string) (io.ReadCloser, error) {
+	ctx, cancel := context.WithTimeout(ctx, getTimeout)
+	in := &s3.GetObjectInput{Bucket: aws.String(c.bucket), Key: aws.String(key)}
+	if rng != "" {
+		in.Range = aws.String(rng)
+	}
+	out, err := c.s3.GetObject(ctx, in)
+	if err != nil {
+		cancel()
+		var nsk *types.NoSuchKey
+		if errors.As(err, &nsk) {
+			return nil, fmt.Errorf("opening %s: %w", key, ErrNotFound)
+		}
+		return nil, fmt.Errorf("opening %s: %w", key, err)
+	}
+	return cancelOnClose{out.Body, cancel}, nil
+}
+
+// cancelOnClose releases the GET's timeout when the body is closed, not when Open returns —
+// a deferred cancel would cut the stream mid-read.
+type cancelOnClose struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b cancelOnClose) Close() error {
+	defer b.cancel()
+	return b.ReadCloser.Close()
 }
 
 // PresignGet returns a time-limited GET URL for key, signed for the PUBLIC endpoint.
