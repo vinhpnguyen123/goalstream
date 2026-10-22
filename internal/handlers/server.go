@@ -54,6 +54,11 @@ func (s *Server) Routes() http.Handler {
 			r.Get("/sessions/{id}/summary", s.sessionSummary)
 			r.Get("/sessions/{id}/next", s.nextClip)
 			r.Post("/feedback", s.postFeedback)
+			// M3, educational: bytes through the API. Never mounted outside dev (API.md).
+			if s.Cfg.AppEnv == "dev" {
+				r.With(middleware.RateLimit(s.Redis, middleware.RulePlay, middleware.ByUser)).
+					Get("/stream/{id}", s.streamClip)
+			}
 		})
 	})
 	return r

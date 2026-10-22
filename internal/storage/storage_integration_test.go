@@ -5,6 +5,7 @@ package storage_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -132,5 +133,40 @@ func TestObjectsAreNotPublic(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("unsigned GET: status %d, want 403 (originals are never public)", resp.StatusCode)
+	}
+}
+
+// Open reads through the internal client — the M3 stream handler's only way to the bytes.
+func TestOpenWholeRangedAndMissing(t *testing.T) {
+	ctx := context.Background()
+	cfg := storagetest.Config(t)
+	c := storage.New(cfg.S3)
+	body := bytes.Repeat([]byte("0123456789"), 100)
+	path := filepath.Join(t.TempDir(), "o.mp4")
+	os.WriteFile(path, body, 0o600)
+	if err := c.PutFile(ctx, "clips/o/original.mp4", path, "video/mp4"); err != nil {
+		t.Fatal(err)
+	}
+	read := func(rng string) []byte {
+		t.Helper()
+		rc, err := c.Open(ctx, "clips/o/original.mp4", rng)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rc.Close()
+		got, err := io.ReadAll(rc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if got := read(""); !bytes.Equal(got, body) {
+		t.Fatalf("whole: %d bytes, want %d", len(got), len(body))
+	}
+	if got := read("bytes=13-22"); string(got) != "3456789012" {
+		t.Fatalf("ranged: %q", got)
+	}
+	if _, err := c.Open(ctx, "clips/missing/original.mp4", ""); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("missing key: %v, want ErrNotFound", err)
 	}
 }
