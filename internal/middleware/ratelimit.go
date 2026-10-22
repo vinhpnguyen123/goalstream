@@ -27,6 +27,9 @@ var (
 	RuleGate       = Rule{"gate", 10, time.Minute, true}
 	RuleGateGlobal = Rule{"gate_global", 100, time.Minute, true}
 	RulePlay       = Rule{"play", 60, time.Minute, false}
+	RuleLogin      = Rule{"login", 10, time.Minute, true}
+	RuleLoginEmail = Rule{"login_email", 5, time.Minute, true} // keyed after decode: Allow
+	RuleRegister   = Rule{"register", 5, time.Hour, true}
 )
 
 // storeTimeout bounds every Redis call: a slow limiter must not become a slow API.
@@ -58,30 +61,38 @@ func ClientIP(r *http.Request, header string) string {
 
 // RateLimit is a fixed window: INCR rl:<rule>:<key>:<window>, EXPIRE on the same key.
 func RateLimit(rdb *redis.Client, rule Rule, key KeyFunc) func(http.Handler) http.Handler {
-	secs := int64(rule.Window / time.Second)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			now := time.Now().Unix()
-			k := fmt.Sprintf("rl:%s:%s:%d", rule.Name, key(r), now/secs)
-			n, err := hit(r.Context(), rdb, k, rule.Window)
-			if err != nil {
-				if rule.FailClosed {
-					httpx.Log(r.Context()).Error("rate limit store down; failing closed", "rule", rule.Name, "err", err)
-					httpx.Error(w, r, http.StatusServiceUnavailable, "unavailable", "temporarily unavailable, try again shortly")
-					return
-				}
-				httpx.Log(r.Context()).Warn("rate limit store down; failing open", "rule", rule.Name, "err", err)
+			if Allow(w, r, rdb, rule, key(r)) {
 				next.ServeHTTP(w, r)
-				return
 			}
-			if n > int64(rule.Limit) {
-				w.Header().Set("Retry-After", strconv.FormatInt(secs-now%secs, 10))
-				httpx.Error(w, r, http.StatusTooManyRequests, "rate_limited", "too many requests")
-				return
-			}
-			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// Allow counts one hit of rule for key. When the request is over the limit, or the store is
+// down and the rule fails closed, it answers 429/503 itself and returns false. Handlers call
+// it directly for keys that only exist after the body is decoded (login_email).
+func Allow(w http.ResponseWriter, r *http.Request, rdb *redis.Client, rule Rule, key string) bool {
+	secs := int64(rule.Window / time.Second)
+	now := time.Now().Unix()
+	k := fmt.Sprintf("rl:%s:%s:%d", rule.Name, key, now/secs)
+	n, err := hit(r.Context(), rdb, k, rule.Window)
+	if err != nil {
+		if rule.FailClosed {
+			httpx.Log(r.Context()).Error("rate limit store down; failing closed", "rule", rule.Name, "err", err)
+			httpx.Error(w, r, http.StatusServiceUnavailable, "unavailable", "temporarily unavailable, try again shortly")
+			return false
+		}
+		httpx.Log(r.Context()).Warn("rate limit store down; failing open", "rule", rule.Name, "err", err)
+		return true
+	}
+	if n > int64(rule.Limit) {
+		w.Header().Set("Retry-After", strconv.FormatInt(secs-now%secs, 10))
+		httpx.Error(w, r, http.StatusTooManyRequests, "rate_limited", "too many requests")
+		return false
+	}
+	return true
 }
 
 func hit(ctx context.Context, rdb *redis.Client, key string, ttl time.Duration) (int64, error) {

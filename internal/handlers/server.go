@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/vinhpnguyen123/goalstream/internal/auth"
 	"github.com/vinhpnguyen123/goalstream/internal/config"
 	"github.com/vinhpnguyen123/goalstream/internal/httpx"
 	"github.com/vinhpnguyen123/goalstream/internal/middleware"
@@ -21,6 +22,9 @@ type Server struct {
 	Cfg   config.Config
 	// DevUserID is the AUTH_MODE=dev user, upserted at startup. Empty in any other mode.
 	DevUserID string
+	// Signer issues and verifies access tokens. Set only when AUTH_MODE=jwt, the only mode with
+	// a JWT_SECRET (config enforces ≥ 32 bytes there).
+	Signer *auth.Signer
 }
 
 // Routes builds the router. Middleware order is docs/API.md § Middleware order; every route
@@ -44,8 +48,19 @@ func (s *Server) Routes() http.Handler {
 			middleware.RateLimit(s.Redis, middleware.RuleGateGlobal, middleware.Global),
 		).Post("/gate", s.gate)
 
+		// Gated, but before authentication: these are how a caller gets authenticated. Mounted
+		// only in jwt mode — dev and closed have no JWT_SECRET, and a token signed with an empty
+		// key must never exist.
+		if s.Cfg.API.AuthMode == "jwt" {
+			r.Group(func(r chi.Router) {
+				r.Use(middleware.Gate(s.Cfg.API))
+				r.With(middleware.RateLimit(s.Redis, middleware.RuleRegister, byIP)).Post("/auth/register", s.register)
+				r.With(middleware.RateLimit(s.Redis, middleware.RuleLogin, byIP)).Post("/auth/login", s.login)
+			})
+		}
+
 		r.Group(func(r chi.Router) {
-			r.Use(middleware.Gate(s.Cfg.API), middleware.Auth(s.Cfg.API.AuthMode, s.DevUserID))
+			r.Use(middleware.Gate(s.Cfg.API), middleware.Auth(s.Cfg.API.AuthMode, s.DevUserID, s.Signer))
 			r.Get("/clips", s.listClips)
 			r.With(middleware.RateLimit(s.Redis, middleware.RulePlay, middleware.ByUser)).
 				Get("/clips/{id}/play", s.playClip)

@@ -2,21 +2,33 @@ package middleware
 
 import (
 	"net/http"
+	"strings"
 
+	"github.com/vinhpnguyen123/goalstream/internal/auth"
 	"github.com/vinhpnguyen123/goalstream/internal/httpx"
 )
 
-// Auth resolves the caller (docs/API.md step 6). "closed" turns every user route away —
-// production until M4. "dev" injects the local dev user; config refuses it in prod.
-// "jwt" arrives in M4.
-func Auth(mode, devUserID string) func(http.Handler) http.Handler {
+// Auth resolves the caller (docs/API.md step 6). "jwt" verifies Authorization: Bearer with
+// signer; "dev" injects the local dev user (config refuses it in prod); "closed" — and
+// anything misconfigured — turns every user route away.
+func Auth(mode, devUserID string, signer *auth.Signer) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if mode != "dev" || devUserID == "" {
+			var user string
+			switch {
+			case mode == "jwt" && signer != nil:
+				tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+				if ok {
+					user, _ = signer.Verify(tok) // "" on any failure
+				}
+			case mode == "dev":
+				user = devUserID
+			}
+			if user == "" {
 				httpx.Error(w, r, http.StatusUnauthorized, "unauthorized", "sign-in is required")
 				return
 			}
-			next.ServeHTTP(w, r.WithContext(httpx.WithUserID(r.Context(), devUserID)))
+			next.ServeHTTP(w, r.WithContext(httpx.WithUserID(r.Context(), user)))
 		})
 	}
 }

@@ -60,6 +60,10 @@ func run(ctx context.Context) error {
 			return err
 		}
 	}
+	var signer *auth.Signer
+	if cfg.API.AuthMode == "jwt" {
+		signer = auth.NewSigner(cfg.API.JWTSecret, cfg.API.AccessTokenTTL)
+	}
 	ropt, err := redis.ParseURL(cfg.RedisURL)
 	if err != nil {
 		return fmt.Errorf("config: REDIS_URL: %w", err)
@@ -69,7 +73,7 @@ func run(ctx context.Context) error {
 
 	srv := &http.Server{
 		Addr:              cfg.API.HTTPAddr,
-		Handler:           (&handlers.Server{Pool: pool, Redis: rdb, Store: storage.New(cfg.S3), Cfg: cfg, DevUserID: devUserID}).Routes(),
+		Handler:           (&handlers.Server{Pool: pool, Redis: rdb, Store: storage.New(cfg.S3), Cfg: cfg, DevUserID: devUserID, Signer: signer}).Routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
