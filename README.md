@@ -114,3 +114,55 @@ make fe                          # shell 2 → http://localhost:5173, invite cod
 | Browser end-to-end tests: only the player's decision logic is unit-tested | the UI flows change often, or more than one person ships frontend code |
 | Closing ended sessions to feedback: a retry may land after `/end` | a session bounds something real — a quota, billing, a time-boxed experiment |
 | Viewing in production: `AUTH_MODE=closed` until sign-in exists (M4) | — this is a staging step, not a trade-off |
+
+### M3 — HTTP Range requests, educational only (`m3-range-edu`)
+
+**What it does.** `GET /api/v1/stream/{id}` serves a clip's bytes **through the API**, with
+hand-written HTTP Range support. It exists to learn what object storage already does for free
+— it is mounted only when `APP_ENV=dev`, sits behind the gate and auth, and the player never
+uses it. Production playback stays on presigned URLs (M1).
+
+**How it works.**
+
+- *Seeking already worked* without any of this: the player reads the MP4 index (`+faststart`
+  puts it first), turns a timestamp into a byte offset and sends `Range: bytes=N-` straight to
+  storage, which answers 206. The API handed out a URL and left the room.
+- *Part 1* (`http.ServeContent`) showed the target behaviour — and its cost: every request pulled
+  the whole ~60 MB clip into the API's memory, even for 100 bytes.
+- *Part 2* (`internal/httpx/range.go`, `internal/handlers/stream.go`): HEAD the object for its
+  size → parse `Range` → fetch **only that slice** with `GetObjectInput.Range` → 206 with
+  `Content-Range`/`Content-Length`; no header → 200; unsatisfiable or malformed → 416 with
+  `Content-Range: bytes */<size>` and an empty body.
+- *Tested against an oracle*: the same requests go to the handler and to `http.ServeContent`;
+  status, headers and body must match. Where the RFC or the plan is stricter, the expectation is
+  written by hand: multi-range → 200 whole body; `bytes=-0` and `bytes=+1-2` → 416 (ServeContent
+  accepts both); every 416 states the size.
+- *Even Part 2 is still a proxy*: memory is flat, but every byte a viewer watches crosses the
+  API's network. That is the whole lesson.
+
+**When proxying media IS justified.** When control is needed at serve time, not just at
+hand-out time: revoking access mid-stream, metering bytes per user for billing, DRM licence
+checks, or watermarking per viewer. Then the bandwidth bill is the price of that control, and
+the proxy belongs at the edge (a CDN worker), not in the API process.
+
+**Run it locally.**
+
+```bash
+APP_ENV=dev make api
+curl -c jar -X POST localhost:8080/api/v1/gate -d '{"code":"let-me-in"}'
+curl -b jar -s -o /dev/null -D - -H 'Range: bytes=0-99' localhost:8080/api/v1/stream/<id>   # 206
+curl -b jar -s -o /dev/null -D - -H 'Range: bytes=999999999-' localhost:8080/api/v1/stream/<id>  # 416
+```
+
+**What I learned.** _(to write in my own words)_
+
+**What I chose not to build — and when that choice would be wrong.**
+
+| Not built | Would be wrong when |
+|---|---|
+| The route in production: it exists only under `APP_ENV=dev` | serve-time control (metering, revocation, DRM) becomes a requirement |
+| Multi-range (`multipart/byteranges`): several ranges get 200 with the whole body | a client that really sends multi-range, e.g. a PDF viewer fetching scattered pages |
+| Conditional requests (`ETag`, `If-Range`, `Last-Modified`) | the bytes behind a key can change — they cannot here: originals are immutable |
+| `HEAD /stream/{id}` | a client probes the size before ranged reads instead of reading `Content-Range` |
+| A longer `WriteTimeout`: the server's 30 s can cut a whole-clip download on a slow link | the route ever leaves localhost |
+| Reusing one storage round trip: each request does HEAD then GET | per-request latency to storage matters — the size could come from Postgres instead |
