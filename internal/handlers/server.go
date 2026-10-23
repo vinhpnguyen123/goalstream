@@ -12,6 +12,7 @@ import (
 	"github.com/vinhpnguyen123/goalstream/internal/config"
 	"github.com/vinhpnguyen123/goalstream/internal/httpx"
 	"github.com/vinhpnguyen123/goalstream/internal/middleware"
+	"github.com/vinhpnguyen123/goalstream/internal/recommend"
 	"github.com/vinhpnguyen123/goalstream/internal/storage"
 )
 
@@ -25,6 +26,8 @@ type Server struct {
 	// Signer issues and verifies access tokens. Set only when AUTH_MODE=jwt, the only mode with
 	// a JWT_SECRET (config enforces ≥ 32 bytes there).
 	Signer *auth.Signer
+	// Reco selects GET /next's clip (plan §11).
+	Reco *recommend.Recommender
 }
 
 // Routes builds the router. Middleware order is docs/API.md § Middleware order; every route

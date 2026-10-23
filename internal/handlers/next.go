@@ -8,7 +8,6 @@ import (
 
 	"github.com/vinhpnguyen123/goalstream/internal/db"
 	"github.com/vinhpnguyen123/goalstream/internal/httpx"
-	"github.com/vinhpnguyen123/goalstream/internal/recommend"
 )
 
 const maxExclude = 100
@@ -29,7 +28,7 @@ func (s *Server) nextClip(w http.ResponseWriter, r *http.Request) {
 	if !notFoundOr(w, r, db.OwnsSession(r.Context(), s.Pool, id, user), "session not found") {
 		return
 	}
-	pick, err := recommend.Next(r.Context(), s.Pool, user, exclude)
+	pick, err := s.Reco.Next(r.Context(), user, exclude)
 	if err != nil {
 		httpx.Internal(w, r, err)
 		return

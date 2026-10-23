@@ -43,6 +43,9 @@ func TestLoadDefaults(t *testing.T) {
 		c.API.RefreshReuseGrace != 30*time.Second {
 		t.Fatalf("token defaults wrong: %+v", c.API)
 	}
+	if c.Reco != (RecoConfig{ExploreRate: 0.3, ColdStartThreshold: 5, TopK: 50, NegPenalty: 0.5}) {
+		t.Fatalf("reco defaults wrong: %+v", c.Reco)
+	}
 }
 
 func TestLoadErrors(t *testing.T) {
@@ -72,6 +75,10 @@ func TestLoadErrors(t *testing.T) {
 		{"test insecure cookie", map[string]string{"APP_ENV": "test", "COOKIE_SECURE": "false"}, []string{"COOKIE_SECURE=false is refused"}},
 		{"invite without code", map[string]string{"INVITE_CODES": "me:abc,friend"}, []string{"INVITE_CODES entry 2 must be id:code"}},
 		{"invite id with separator", map[string]string{"INVITE_CODES": "a|b:abc"}, []string{"must not contain |"}},
+		{"bad float", map[string]string{"EXPLORE_RATE": "a lot"}, []string{"EXPLORE_RATE must be a number"}},
+		{"NaN float", map[string]string{"NEG_PENALTY": "NaN"}, []string{"NEG_PENALTY must be a number"}},
+		{"explore rate above 1", map[string]string{"EXPLORE_RATE": "1.5"}, []string{"EXPLORE_RATE must be in [0,1]"}},
+		{"top k zero", map[string]string{"RECO_TOP_K": "0"}, []string{"RECO_TOP_K 1–1000"}},
 		{"invite duplicate id", map[string]string{"INVITE_CODES": "me:abc,me:def"}, []string{`duplicate id "me"`}},
 	}
 	for _, tc := range cases {

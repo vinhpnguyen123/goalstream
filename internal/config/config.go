@@ -5,6 +5,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"strconv"
@@ -20,6 +21,15 @@ type Config struct {
 	S3          S3Config
 	Ingest      IngestConfig
 	API         APIConfig
+	Reco        RecoConfig
+}
+
+// RecoConfig tunes selection (plan §11). Read by the API only.
+type RecoConfig struct {
+	ExploreRate        float64 // share of warm picks served from below the median similarity
+	ColdStartThreshold int     // liked + disliked below this → uniform random, no centroid query
+	TopK               int     // exploit stage 1 candidates, re-ranked in Go
+	NegPenalty         float64 // weight of cos(v, negative) in the stage 2 score
 }
 
 // APIConfig is read by every binary but only cmd/api requires it: ValidateAPI.
@@ -108,6 +118,16 @@ func Load(getenv func(string) string) (Config, error) {
 			InviteTTL:         p.duration("INVITE_TTL", 720*time.Hour),
 			ClientIPHeader:    p.str("CLIENT_IP_HEADER", ""),
 		},
+		Reco: RecoConfig{
+			ExploreRate:        p.float("EXPLORE_RATE", 0.3),
+			ColdStartThreshold: p.integer("COLD_START_THRESHOLD", 5),
+			TopK:               p.integer("RECO_TOP_K", 50),
+			NegPenalty:         p.float("NEG_PENALTY", 0.5),
+		},
+	}
+	if r := c.Reco; r.ExploreRate < 0 || r.ExploreRate > 1 || r.ColdStartThreshold < 0 ||
+		r.TopK < 1 || r.TopK > 1000 || r.NegPenalty < 0 {
+		p.errs = append(p.errs, errors.New("EXPLORE_RATE must be in [0,1], COLD_START_THRESHOLD ≥ 0, RECO_TOP_K 1–1000, NEG_PENALTY ≥ 0"))
 	}
 	// Startup guards (CONVENTIONS.md): settings that are only safe on a laptop.
 	if c.AppEnv == "prod" {
@@ -211,6 +231,18 @@ func (p *parser) integer(key string, def int) int {
 		p.errs = append(p.errs, fmt.Errorf("%s must be an integer, got %q", key, raw))
 	}
 	return n
+}
+
+func (p *parser) float(key string, def float64) float64 {
+	raw := p.str(key, "")
+	if raw == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+		p.errs = append(p.errs, fmt.Errorf("%s must be a number, got %q", key, raw))
+	}
+	return f
 }
 
 func (p *parser) seconds(key string, def int) time.Duration {

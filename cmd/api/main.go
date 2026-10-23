@@ -3,9 +3,11 @@ package main
 
 import (
 	"context"
+	crand "crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"os/signal"
@@ -19,6 +21,7 @@ import (
 	"github.com/vinhpnguyen123/goalstream/internal/config"
 	"github.com/vinhpnguyen123/goalstream/internal/db"
 	"github.com/vinhpnguyen123/goalstream/internal/handlers"
+	"github.com/vinhpnguyen123/goalstream/internal/recommend"
 	"github.com/vinhpnguyen123/goalstream/internal/storage"
 )
 
@@ -76,9 +79,16 @@ func run(ctx context.Context) error {
 	rdb := redis.NewClient(ropt) // not pinged: the limiter decides per rule what an outage means
 	defer rdb.Close()
 
+	var seed [32]byte
+	if _, err := crand.Read(seed[:]); err != nil {
+		return fmt.Errorf("seeding the recommender: %w", err)
+	}
+	reco := recommend.NewRecommender(pool, cfg.Reco, rand.New(rand.NewChaCha8(seed)))
+
 	srv := &http.Server{
-		Addr:              cfg.API.HTTPAddr,
-		Handler:           (&handlers.Server{Pool: pool, Redis: rdb, Store: storage.New(cfg.S3), Cfg: cfg, DevUserID: devUserID, Signer: signer}).Routes(),
+		Addr: cfg.API.HTTPAddr,
+		Handler: (&handlers.Server{Pool: pool, Redis: rdb, Store: storage.New(cfg.S3), Cfg: cfg,
+			DevUserID: devUserID, Signer: signer, Reco: reco}).Routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
