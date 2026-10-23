@@ -58,8 +58,18 @@ func Rate(ctx context.Context, pool *pgxpool.Pool, in Rating) (changed bool, pre
 		}
 		// Taken next, before anything is read: every rating change of one user is serialized,
 		// so two concurrent requests cannot both read the same prev and both move the vector.
-		if _, err := tx.Exec(ctx, `INSERT INTO user_taste (user_id) VALUES ($1) ON CONFLICT DO NOTHING`, in.UserID); err != nil {
+		tag, err := tx.Exec(ctx, `INSERT INTO user_taste (user_id) VALUES ($1) ON CONFLICT DO NOTHING`, in.UserID)
+		if err != nil {
 			return fmt.Errorf("creating taste of %s: %w", in.UserID, err)
+		}
+		// A new row may still have history: ratings from before user_taste existed (M2). Build
+		// it from them now, or the first re-rate of an old clip would subtract a vector the
+		// empty row never held (count −1 → taste_*_chk → 500). A concurrent first Rate waits on
+		// our uncommitted row, then finds it and skips this.
+		if tag.RowsAffected() == 1 {
+			if err := rebuildTaste(ctx, tx, &in.UserID); err != nil {
+				return err
+			}
 		}
 		var t taste
 		var pos, neg *string
@@ -92,7 +102,7 @@ func Rate(ctx context.Context, pool *pgxpool.Pool, in Rating) (changed bool, pre
 			}
 		}
 		var emb string
-		err := tx.QueryRow(ctx, `SELECT embedding::text FROM clips WHERE id = $1`, in.ClipID).Scan(&emb)
+		err = tx.QueryRow(ctx, `SELECT embedding::text FROM clips WHERE id = $1`, in.ClipID).Scan(&emb)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return db.ErrNotFound
 		} else if err != nil {
@@ -140,7 +150,7 @@ func Rate(ctx context.Context, pool *pgxpool.Pool, in Rating) (changed bool, pre
 		}
 		// Guarded by the counts read under FOR UPDATE: 0 rows means the lock did not hold.
 		// A nil centroid is written as NULL (taste_*_chk); it is never sent to a vector operator.
-		tag, err := tx.Exec(ctx, `
+		tag, err = tx.Exec(ctx, `
 			UPDATE user_taste
 			   SET positive_centroid = $2::vector, negative_centroid = $3::vector,
 			       liked_count = $4, disliked_count = $5, updated_at = now()

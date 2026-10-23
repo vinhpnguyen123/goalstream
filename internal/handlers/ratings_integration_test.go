@@ -311,3 +311,38 @@ func TestListRatings(t *testing.T) {
 		}
 	}
 }
+
+// A user rated before user_taste existed (M2): the first Rate builds the row from that history
+// instead of starting empty — re-rating an old 'loved' used to drive liked_count to −1 (500).
+func TestRateInitializesTasteFromPriorFeedback(t *testing.T) {
+	e := setupAPI(t)
+	a, _ := e.seedVecClip(t, 1)
+	b, vb := e.seedVecClip(t, 2)
+	c, vc := e.seedVecClip(t, 3)
+	for i, r := range []struct{ clip, response string }{{a, "loved"}, {b, "not_for_me"}} {
+		if _, err := e.s.Pool.Exec(context.Background(), `
+			INSERT INTO feedback_events (user_id, clip_id, response, created_at)
+			VALUES ($1, $2, $3, now() - make_interval(secs => $4))`, e.s.DevUserID, r.clip, r.response, 10-i); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := e.count(t, `SELECT count(*) FROM user_taste`); n != 0 {
+		t.Fatal("precondition: no user_taste row")
+	}
+
+	if rec, body := e.putRating(t, a, "okay"); rec.Code != 200 || data(body)["previous"] != "loved" {
+		t.Fatalf("re-rate of a pre-taste loved: %d %v", rec.Code, body)
+	}
+	got := e.taste(t)
+	if got.liked != 0 || got.disliked != 1 || got.pos != nil {
+		t.Fatalf("after loved→okay: counts %d/%d pos nil=%v, want 0/1 nil", got.liked, got.disliked, got.pos == nil)
+	}
+	sameVec(t, "negative centroid", got.neg, vb)
+
+	e.putRating(t, c, "loved")
+	got = e.taste(t)
+	if got.liked != 1 || got.disliked != 1 {
+		t.Fatalf("counts %d/%d, want 1/1", got.liked, got.disliked)
+	}
+	sameVec(t, "positive centroid", got.pos, vc)
+}
