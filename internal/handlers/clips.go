@@ -20,25 +20,34 @@ const (
 	maxPageSize     = 100
 )
 
-// listClips is GET /clips?cursor=&limit=.
-func (s *Server) listClips(w http.ResponseWriter, r *http.Request) {
-	limit := defaultPageSize
+// pageParams reads ?limit= (1–100, default 20) and ?cursor= for the keyset-paged lists,
+// answering 400 itself when either is invalid.
+func pageParams(w http.ResponseWriter, r *http.Request) (limit int, after *db.Cursor, ok bool) {
+	limit = defaultPageSize
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		n, err := strconv.Atoi(raw)
 		if err != nil || n < 1 || n > maxPageSize {
 			httpx.Error(w, r, http.StatusBadRequest, "validation_error", "limit must be an integer from 1 to 100")
-			return
+			return 0, nil, false
 		}
 		limit = n
 	}
-	var after *db.Cursor
 	if raw := r.URL.Query().Get("cursor"); raw != "" {
 		c, err := decodeCursor(raw)
 		if err != nil {
 			httpx.Error(w, r, http.StatusBadRequest, "validation_error", "cursor is invalid")
-			return
+			return 0, nil, false
 		}
 		after = &c
+	}
+	return limit, after, true
+}
+
+// listClips is GET /clips?cursor=&limit=.
+func (s *Server) listClips(w http.ResponseWriter, r *http.Request) {
+	limit, after, ok := pageParams(w, r)
+	if !ok {
+		return
 	}
 
 	items, err := db.ListClips(r.Context(), s.Pool, after, limit+1) // one extra: is there a next page?

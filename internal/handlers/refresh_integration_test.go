@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 
@@ -228,4 +229,68 @@ func errTypeOf(rec *httptest.ResponseRecorder) string {
 	var body map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &body)
 	return errType(body)
+}
+
+// A family-wide revoke that runs while a rotation is mid-flight must also kill the successor
+// that rotation inserts. Deterministic: the test holds a rotation open right before COMMIT
+// (family locked, `first` rotated, `next` inserted), starts the revoke, waits until it is
+// blocked, then commits. Without auth.LockFamily the revoke's snapshot misses `next`.
+func TestFamilyRevokeRacesRotation(t *testing.T) {
+	for name, revoke := range map[string]func(e apiEnv, first, stale string){
+		"logout": func(e apiEnv, first, _ string) { e.authPost("/api/v1/auth/logout", first) },
+		"reuse":  func(e apiEnv, _, stale string) { e.authPost("/api/v1/auth/refresh", stale) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := jwtAPI(t)
+			_, stale := e.loggedIn(t)
+			_, first, _ := e.refresh(t, stale)
+			e.ageRotation(t, stale, "31 seconds") // replaying `stale` is now theft
+
+			ctx := context.Background()
+			tx, err := e.s.Pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback(ctx)
+			var id, user, family string
+			if err := tx.QueryRow(ctx, `SELECT id, user_id, family_id FROM refresh_tokens WHERE token_hash = $1`,
+				auth.HashRefresh(first)).Scan(&id, &user, &family); err != nil {
+				t.Fatal(err)
+			}
+			if err := auth.LockFamily(ctx, tx, family); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tx.Exec(ctx, `UPDATE refresh_tokens SET revoked_at = now(), revoked_reason = 'rotated' WHERE id = $1`, id); err != nil {
+				t.Fatal(err)
+			}
+			next, err := auth.IssueRefresh(ctx, tx, user, family, time.Hour)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			done := make(chan struct{})
+			go func() { revoke(e, first, stale); close(done) }()
+			for deadline := time.Now().Add(5 * time.Second); ; { // until the revoke waits on a lock
+				if e.count(t, `SELECT count(*) FROM pg_stat_activity
+					WHERE wait_event_type = 'Lock' AND datname = current_database()`) > 0 {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("the revoke never blocked on the in-flight rotation")
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+			<-done
+
+			if got := e.statuses(t, first); got["active"] != 0 {
+				t.Fatalf("family after %s: %v, want no active token", name, got)
+			}
+			if code, _, _ := e.refresh(t, next); code != 401 {
+				t.Fatalf("the in-flight successor still refreshes after %s: %d", name, code)
+			}
+		})
+	}
 }

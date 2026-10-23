@@ -8,6 +8,7 @@ type Gate = 'checking' | 'invite' | 'login' | 'in' | 'error'
 
 export default function App() {
   const [gate, setGate] = useState<Gate>('checking')
+  const [signOutError, setSignOutError] = useState('')
 
   const check = useCallback(() => {
     probe()
@@ -22,8 +23,13 @@ export default function App() {
   useEffect(check, [check])
 
   async function signOut() {
-    await logout()
-    setGate('login')
+    setSignOutError('')
+    try {
+      await logout()
+      setGate('login')
+    } catch {
+      setSignOutError('Sign out failed. Try again.') // still signed in: the refresh cookie is live
+    }
   }
 
   return (
@@ -41,7 +47,8 @@ export default function App() {
         <>
           {/* AUTH_MODE=dev issues no token, so there is nothing to sign out of */}
           {signedIn() && (
-            <header className="flex justify-end px-4 pt-2">
+            <header className="flex items-center justify-end gap-3 px-4 pt-2">
+              {signOutError && <p role="alert" className="text-sm text-red-400">{signOutError}</p>}
               <button onClick={signOut} className="py-2 text-sm text-neutral-400">Sign out</button>
             </header>
           )}

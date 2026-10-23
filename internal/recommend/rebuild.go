@@ -18,6 +18,17 @@ func LockRebuild(ctx context.Context, tx pgx.Tx) error {
 	return nil
 }
 
+// lockRebuildShared is LockRebuild's reader side, taken FIRST by Rate. Rates run concurrently
+// with each other but never with a rebuild, so (1) the vector a Rate subtracts is the one that
+// was added — a rebuild changes vectors and centroids together — and (2) a rebuild never
+// computes centroids from a feedback snapshot that misses a Rate committing under it.
+func lockRebuildShared(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtext('rebuild:embeddings'))`); err != nil {
+		return fmt.Errorf("locking embedding rebuild (shared): %w", err)
+	}
+	return nil
+}
+
 // ReembedAll recomputes every clip embedding from its columns + vocab (docs/SCHEMA.md
 // § Rebuilds). Run it inside the transaction that changed the inputs, so a reader never sees
 // new tags with an old vector. Centroid rebuilds join here when user_taste exists (M4).

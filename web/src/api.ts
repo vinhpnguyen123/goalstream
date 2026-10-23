@@ -77,10 +77,11 @@ export async function login(email: string, password: string) {
 export const register = (email: string, password: string, display_name?: string) =>
   api<unknown>('/auth/register', { method: 'POST', body: JSON.stringify({ email, password, display_name }) })
 
-// logout drops the token even when the request fails: the user asked to be signed out here.
+// logout is done only when the server confirms (204): until then the HttpOnly gs_refresh cookie
+// is still live, and a reload would sign straight back in. A failure throws and keeps the token.
 export async function logout() {
+  await api<unknown>('/auth/logout', { method: 'POST' })
   accessToken = null
-  await api<unknown>('/auth/logout', { method: 'POST' }).catch(() => {})
 }
 
 export const enterInvite = (code: string) =>

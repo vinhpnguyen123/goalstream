@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 // current valid token. Each test re-imports api.ts so the in-memory token starts empty.
 let valid = 'tok-1'
 let refreshWith: () => Response
+let logoutWith: () => Response
 const calls: { path: string; auth: string | null }[] = []
 
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status })
@@ -14,12 +15,14 @@ beforeEach(() => {
   valid = 'tok-1'
   calls.length = 0
   refreshWith = () => json(200, { data: { access_token: valid, expires_in: 900 } })
+  logoutWith = () => new Response(null, { status: 204 })
   vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
     const path = url.replace('/api/v1', '')
     const auth = (init.headers as Record<string, string>).Authorization ?? null
     calls.push({ path, auth })
     await new Promise((r) => setTimeout(r, path === '/slow' ? 40 : 5)) // keep callers overlapping
     if (path === '/auth/refresh') return refreshWith()
+    if (path === '/auth/logout') return logoutWith()
     if (path === '/auth/login') return json(401, { error: { type: 'invalid_credentials', message: 'no' } })
     return auth === 'Bearer ' + valid ? json(200, { data: path }) : unauthorized()
   })
@@ -70,5 +73,17 @@ describe('api', () => {
     // /slow is sent with tok-1 and its 401 lands only after /c has refreshed to tok-2
     await expect(Promise.all([api('/slow'), api('/c')])).resolves.toEqual(['/slow', '/c'])
     expect(refreshes()).toBe(2)
+  })
+
+  it('logout signs out only when the server confirms it', async () => {
+    const { api, logout, signedIn } = await import('./api')
+    await api('/a')
+    logoutWith = () => json(500, { error: { type: 'internal', message: 'boom' } })
+    await expect(logout()).rejects.toMatchObject({ type: 'internal' })
+    expect(signedIn()).toBe(true) // the cookie is still live: the UI must not claim otherwise
+
+    logoutWith = () => new Response(null, { status: 204 })
+    await logout()
+    expect(signedIn()).toBe(false)
   })
 })

@@ -64,8 +64,11 @@ func Rotate(ctx context.Context, pool *pgxpool.Pool, token string, ttl, grace ti
 		var id, family string
 		var expired, withinGrace bool
 		var reason *string
-		// FOR UPDATE: two concurrent refreshes of one token queue here instead of both reading
-		// "active". The second then sees the first's rotation and takes the grace branch.
+		if err := lockFamilyOf(ctx, tx, token, &family); err != nil {
+			return err
+		}
+		// Read again under the family lock: this statement's snapshot sees whatever the
+		// previous holder committed. FOR UPDATE stays as the row-level guard of the rotation.
 		err := tx.QueryRow(ctx, `
 			SELECT id, user_id, family_id, expires_at <= now(),
 			       COALESCE(revoked_at > now() - make_interval(secs => $2), false), revoked_reason
@@ -138,13 +141,44 @@ func Rotate(ctx context.Context, pool *pgxpool.Pool, token string, ttl, grace ti
 // Logout revokes the token's whole family ('logout'): every device that shares this login is
 // signed out. An unknown token is not an error — logout is idempotent.
 func Logout(ctx context.Context, pool *pgxpool.Pool, token string) error {
-	if _, err := pool.Exec(ctx, `
-		UPDATE refresh_tokens SET revoked_at = now(), revoked_reason = 'logout'
-		 WHERE revoked_at IS NULL
-		   AND family_id = (SELECT family_id FROM refresh_tokens WHERE token_hash = $1)`, HashRefresh(token)); err != nil {
-		return fmt.Errorf("revoking refresh family: %w", err)
+	return pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		var family string
+		if err := lockFamilyOf(ctx, tx, token, &family); errors.Is(err, ErrRefreshInvalid) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE refresh_tokens SET revoked_at = now(), revoked_reason = 'logout'
+			 WHERE family_id = $1 AND revoked_at IS NULL`, family); err != nil {
+			return fmt.Errorf("revoking refresh family: %w", err)
+		}
+		return nil
+	})
+}
+
+// LockFamily serializes every write to one refresh family — rotation, logout, reuse revocation
+// — for the rest of tx. A family-wide revoke is an UPDATE … WHERE revoked_at IS NULL, and its
+// snapshot cannot see a successor that a concurrent rotation inserts; without this lock that
+// successor survives a logout or a theft revoke. Take it before reading or locking any token
+// row. Transaction-scoped; a hash collision between two families only costs extra waiting.
+func LockFamily(ctx context.Context, tx pgx.Tx, family string) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('refresh:' || $1))`, family); err != nil {
+		return fmt.Errorf("locking refresh family: %w", err)
 	}
 	return nil
+}
+
+// lockFamilyOf finds the token's family (without locking its row) and takes LockFamily.
+// An unknown token is ErrRefreshInvalid.
+func lockFamilyOf(ctx context.Context, tx pgx.Tx, token string, family *string) error {
+	err := tx.QueryRow(ctx, `SELECT family_id FROM refresh_tokens WHERE token_hash = $1`, HashRefresh(token)).Scan(family)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrRefreshInvalid
+	} else if err != nil {
+		return fmt.Errorf("reading refresh family: %w", err)
+	}
+	return LockFamily(ctx, tx, *family)
 }
 
 // PruneRefresh deletes tokens expired for more than a day. A pruned token that is replayed is

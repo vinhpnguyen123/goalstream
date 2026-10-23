@@ -71,6 +71,8 @@ func (s *Server) Routes() http.Handler {
 			r.Get("/sessions/{id}/summary", s.sessionSummary)
 			r.Get("/sessions/{id}/next", s.nextClip)
 			r.Post("/feedback", s.postFeedback)
+			r.Put("/ratings/{clip_id}", s.putRating)
+			r.Get("/ratings", s.listRatings)
 			// M3, educational: bytes through the API. Never mounted outside dev (API.md).
 			if s.Cfg.AppEnv == "dev" {
 				r.With(middleware.RateLimit(s.Redis, middleware.RulePlay, middleware.ByUser)).
