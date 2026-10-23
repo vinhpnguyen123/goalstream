@@ -41,7 +41,7 @@ func TestNextSkipsSeenAndExcluded(t *testing.T) {
 	for range 100 {
 		d := e.next(t, sess, excluded...)
 		clip, _ := d["clip"].(map[string]any)
-		if clip == nil || d["mode"] != "random" || d["reason"] != "random pick" || d["exhausted"] != false {
+		if clip == nil || d["mode"] != "cold" || d["reason"] != "getting to know you" || d["exhausted"] != false {
 			t.Fatalf("next: %v", d)
 		}
 		served[clip["id"].(string)]++
@@ -64,7 +64,7 @@ func TestNextExhausted(t *testing.T) {
 	}
 	a, b := e.seedClip(t, "a", time.Now(), []byte("x")), e.seedClip(t, "b", time.Now(), []byte("x"))
 	e.postJSON(t, "/api/v1/feedback", feedbackBody(sess, a, "loved"))
-	if d := e.next(t, sess, b); d["clip"] != nil || d["exhausted"] != true || d["mode"] != "random" {
+	if d := e.next(t, sess, b); d["clip"] != nil || d["exhausted"] != true || d["mode"] != "cold" {
 		t.Fatalf("all seen or excluded: %v", d)
 	}
 }

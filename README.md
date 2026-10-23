@@ -166,3 +166,92 @@ curl -b jar -s -o /dev/null -D - -H 'Range: bytes=999999999-' localhost:8080/api
 | `HEAD /stream/{id}` | a client probes the size before ranged reads instead of reading `Content-Range` |
 | A longer `WriteTimeout`: the server's 30 s can cut a whole-clip download on a slow link | the route ever leaves localhost |
 | Reusing one storage round trip: each request does HEAD then GET | per-request latency to storage matters — the size could come from Postgres instead |
+
+### M4 — auth and recommender (`m4-auth-reco`)
+
+**What it does.** Real accounts replace the dev stub: register and sign in behind the invite gate,
+stay signed in across reloads, sign out. Every rating now teaches the system what you like, and
+`/next` picks from that instead of at random — mostly clips close to what you loved and away from
+what you didn't, with a share of deliberately different ones. A history screen lists your current
+ratings and lets you change any of them. Production runs `AUTH_MODE=jwt` with one registered
+account.
+
+**How it works.**
+
+- *Passwords* (`internal/auth/password.go`): argon2id with library defaults, 10–128 characters.
+  An unknown email still runs a comparison against a fixed dummy hash, so response time does not
+  reveal which emails exist.
+- *Access token*: JWT HS256, 15 minutes, held **in memory only** in the browser — never
+  localStorage. Verification pins the algorithm, so a token claiming `none` or RS256 is refused.
+- *Refresh token* (`internal/auth/refresh.go`): 32 random bytes in an `HttpOnly; SameSite=Strict`
+  cookie scoped to `/api/v1/auth`, stored as a SHA-256 hash. Every refresh rotates it within a
+  *family*. Replaying a rotated token within 30 s is a tab race (two tabs, React StrictMode) and
+  gets a successor; later, it is treated as theft and the whole family is revoked and audited.
+  The client single-flights refresh, so concurrent 401s share one rotation.
+- *One lock per family*: rotation, logout and theft revocation all take an advisory lock on the
+  family first. Without it, a logout racing a rotation revoked the old token but missed the
+  successor the rotation was inserting — a deterministic test held a rotation open before COMMIT
+  and showed the successor still refreshing after logout.
+- *Admin*: `users.is_admin`, granted only by `make admin EMAIL=…`, read from Postgres on every
+  request; a non-admin gets 404, not 403.
+- *Taste* (`internal/recommend/rate.go`): each user has a positive and a negative centroid — the
+  running mean of the vectors of clips they currently love / dislike. A rating moves one vector:
+  subtract it from the old rating's mean, add it to the new one's. One transaction, serialized
+  per user by locking the `user_taste` row first. Removing the last vector makes the mean NULL,
+  not zero.
+- *A bug the concurrency test found*: `created_at` defaulted to `now()`, which is the
+  transaction's *start*. A request that started first but waited on the lock appended a row that
+  sorted before the one it followed, so the next request read a stale "current rating" and
+  removed the vector from the wrong mean. Rows are now stamped under the lock, strictly after
+  the previous one.
+- *Rebuilds* (`internal/recommend/rebuild.go`): when clip vectors change (`make ingest-tags`,
+  `make reembed`), every centroid is recomputed from current ratings with pgvector's `AVG`, in
+  the same transaction, under a lock that ratings take in shared mode. The same rebuild runs for
+  one user the first time they rate after this milestone, so ratings from M2 are not lost.
+- *Selection* (`internal/recommend/next.go`):
+  - fewer than 5 loved + not-for-me ratings → *cold*: uniform random, and the centroids are not
+    even read (a query counter in the test proves it). Rating everything "okay" stays cold —
+    it says nothing directional.
+  - otherwise 70 % *exploit*: the 50 nearest eligible clips by cosine distance in SQL, re-ranked
+    in Go by `cos(v, pos) − 0.5·cos(v, neg)` — one `ORDER BY` cannot express distance to two
+    vectors. Dislikes only → the clips farthest from what you disliked.
+  - 30 % *explore*: uniform among eligible clips less similar to your taste than the median.
+  - randomness comes from an injected RNG, so the tests are seeded and deterministic.
+
+**Run it locally.**
+
+```bash
+make up && make api && make fe   # AUTH_MODE=dev skips sign-in; AUTH_MODE=jwt + JWT_SECRET for real accounts
+make reembed                     # rebuild every embedding and every centroid
+make latency                     # p50/p95 of GET /next (AUTH_MODE=dev, a user with ≥ 5 ratings)
+```
+
+**Latency of `GET /next`** — 1000 sequential warm requests through the whole HTTP stack (gate,
+auth, rate limiter), local Postgres 16 + pgvector 0.8.7, Apple M1, measured 2026-10-23:
+
+| Catalogue | p50 | p95 | max | Modes served |
+|---|---|---|---|---|
+| 21 clips | 6.6 ms | 18.2 ms | 231.9 ms | 695 exploit · 305 explore |
+
+To re-measure at M4.5 with the full catalogue (88 clips).
+
+**What I learned.** _(to write in my own words)_
+
+**What I chose not to build — and when that choice would be wrong.**
+
+| Not built | Would be wrong when |
+|---|---|
+| A cap on concurrent argon2id hashes (64 MB each) | registration is public, without the invite gate in front of it |
+| `/auth/*` outside jwt mode: dev and closed mount no auth routes | another mode needs to issue or revoke tokens |
+| An absolute lifetime for a refresh family: expiry slides 7 days with each rotation | a policy requires re-authentication every N days regardless of activity |
+| An audit trail for admin grants (`make admin` is SQL) | admins are granted through the API or by more than one person |
+| Proactive refresh before the access token expires: refresh happens on the first 401 | a request cannot be retried safely, or the extra round trip every 15 min is felt |
+| Logout synced across tabs: another tab learns at its next 401 | several people share one browser |
+| Per-family lock rows: the advisory lock key is `hashtext(family_id)`, so two families can collide | refresh volume is high enough that colliding families waiting on each other is measurable |
+| Tag-based explanations ("because you liked headers"): reasons are generic | users need to trust or correct why a clip was chosen |
+| A vector index: stage 1 is an exact scan | the catalogue passes ~1000 clips (HNSW) |
+| Ties at the explore median: below-median is strict, so mostly-identical vectors empty the pool (→ exploit) | many clips share an embedding, e.g. untagged clips of one team |
+| Incremental rebuilds: a rebuild recomputes every user under an exclusive lock that pauses rating | there are enough ratings that `make reembed` takes noticeable time |
+| A maintained current-ratings table: `GET /ratings` computes every current rating, then pages | a user has thousands of ratings |
+| History reachable mid-session: only from the start and summary screens | users want to fix a rating while watching |
+| A single centroid per sign: it cannot represent multi-modal taste | a user loves two unrelated kinds of goals and the mean lands between them |

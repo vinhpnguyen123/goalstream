@@ -3,25 +3,33 @@ package main
 
 import (
 	"context"
+	crand "crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/vinhpnguyen123/goalstream/internal/auth"
 	"github.com/vinhpnguyen123/goalstream/internal/config"
 	"github.com/vinhpnguyen123/goalstream/internal/db"
 	"github.com/vinhpnguyen123/goalstream/internal/handlers"
+	"github.com/vinhpnguyen123/goalstream/internal/recommend"
 	"github.com/vinhpnguyen123/goalstream/internal/storage"
 )
 
-const shutdownGrace = 15 * time.Second
+const (
+	shutdownGrace = 15 * time.Second
+	pruneEvery    = time.Hour
+	pruneTimeout  = 30 * time.Second
+)
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -60,6 +68,10 @@ func run(ctx context.Context) error {
 			return err
 		}
 	}
+	var signer *auth.Signer
+	if cfg.API.AuthMode == "jwt" {
+		signer = auth.NewSigner(cfg.API.JWTSecret, cfg.API.AccessTokenTTL)
+	}
 	ropt, err := redis.ParseURL(cfg.RedisURL)
 	if err != nil {
 		return fmt.Errorf("config: REDIS_URL: %w", err)
@@ -67,9 +79,16 @@ func run(ctx context.Context) error {
 	rdb := redis.NewClient(ropt) // not pinged: the limiter decides per rule what an outage means
 	defer rdb.Close()
 
+	var seed [32]byte
+	if _, err := crand.Read(seed[:]); err != nil {
+		return fmt.Errorf("seeding the recommender: %w", err)
+	}
+	reco := recommend.NewRecommender(pool, cfg.Reco, rand.New(rand.NewChaCha8(seed)))
+
 	srv := &http.Server{
-		Addr:              cfg.API.HTTPAddr,
-		Handler:           (&handlers.Server{Pool: pool, Redis: rdb, Store: storage.New(cfg.S3), Cfg: cfg, DevUserID: devUserID}).Routes(),
+		Addr: cfg.API.HTTPAddr,
+		Handler: (&handlers.Server{Pool: pool, Redis: rdb, Store: storage.New(cfg.S3), Cfg: cfg,
+			DevUserID: devUserID, Signer: signer, Reco: reco}).Routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -77,6 +96,9 @@ func run(ctx context.Context) error {
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
+	if cfg.API.AuthMode == "jwt" {
+		go pruneLoop(ctx, pool)
+	}
 	slog.Info("api listening", "addr", cfg.API.HTTPAddr, "app_env", cfg.AppEnv, "auth_mode", cfg.API.AuthMode,
 		"gate_enabled", cfg.API.GateEnabled)
 
@@ -92,4 +114,26 @@ func run(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// pruneLoop deletes refresh tokens expired for more than a day, hourly, until shutdown. A
+// failed run is logged and retried on the next tick: stale rows are inert, not urgent.
+func pruneLoop(ctx context.Context, pool *pgxpool.Pool) {
+	t := time.NewTicker(pruneEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		pctx, cancel := context.WithTimeout(ctx, pruneTimeout)
+		n, err := auth.PruneRefresh(pctx, pool)
+		cancel()
+		if err != nil {
+			slog.Error("pruning refresh tokens", "err", err)
+			continue
+		}
+		slog.Info("pruned refresh tokens", "deleted", n)
+	}
 }

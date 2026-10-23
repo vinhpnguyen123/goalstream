@@ -5,6 +5,7 @@ import {
 } from './api'
 import { addExclude } from './playback'
 import Player from './Player'
+import History from './History'
 import Summary from './Summary'
 
 type Phase =
@@ -13,26 +14,37 @@ type Phase =
   | { k: 'watching'; clip: Clip }
   | { k: 'summary'; summary: S }
   | { k: 'error'; message: string }
+  | { k: 'history' }
 
 const RATINGS: [Rating, string][] = [['loved', 'Loved it'], ['okay', 'Okay'], ['not_for_me', 'Not for me']]
 
 // Session is the viewing loop: start → next → play → rate or skip → next … → summary.
 // The exclude list (served but not rated) lives here, in component state (CONVENTIONS).
-export default function Session({ onGateLost }: { onGateLost: () => void }) {
+export default function Session({ onGateLost, onSignedOut }: { onGateLost: () => void; onSignedOut: () => void }) {
   const [phase, setPhase] = useState<Phase>({ k: 'idle' })
   const [exclude, setExclude] = useState<string[]>([])
   const session = useRef('')
   const stats = useRef({ watchedFull: false, replays: 0 })
   const lastStep = useRef<() => Promise<void>>(async () => {})
 
-  // run wraps every API step: gate_required → invite screen; anything else → an error with a
-  // Retry that runs the same step again. A media failure never lands here — the Player skips
-  // those silently. Retrying a rate after its feedback landed is safe: feedback is idempotent.
+  // lost handles the two errors no Retry can fix: gate_required → invite screen; unauthorized
+  // (the refresh already failed) → sign-in screen.
+  function lost(err: unknown) {
+    if (!(err instanceof ApiError)) return false
+    if (err.type === 'gate_required') onGateLost()
+    else if (err.type === 'unauthorized') onSignedOut()
+    else return false
+    return true
+  }
+
+  // run wraps every API step: lost() first; anything else → an error with a Retry that runs the
+  // same step again. A media failure never lands here — the Player skips those silently.
+  // Retrying a rate after its feedback landed is safe: feedback is idempotent.
   function run(step: () => Promise<void>) {
     lastStep.current = step
     setPhase({ k: 'loading' })
     step().catch((err) => {
-      if (err instanceof ApiError && err.type === 'gate_required') return onGateLost()
+      if (lost(err)) return
       setPhase({ k: 'error', message: err instanceof ApiError ? err.message : 'Something went wrong.' })
     })
   }
@@ -71,7 +83,7 @@ export default function Session({ onGateLost }: { onGateLost: () => void }) {
 
   // /play itself failed (not the media). Retry remounts the Player for the same clip.
   function playFailed(clip: Clip, err: unknown) {
-    if (err instanceof ApiError && err.type === 'gate_required') return onGateLost()
+    if (lost(err)) return
     lastStep.current = async () => setPhase({ k: 'watching', clip })
     setPhase({ k: 'error', message: err instanceof ApiError ? err.message : 'Something went wrong.' })
   }
@@ -82,6 +94,9 @@ export default function Session({ onGateLost }: { onGateLost: () => void }) {
         <main className="flex min-h-dvh flex-col items-center justify-center gap-6 px-4">
           <h1 className="text-2xl font-semibold">GoalStream</h1>
           <button onClick={start} className="w-full max-w-sm rounded-lg bg-emerald-600 py-3 font-medium">Start watching</button>
+          <button onClick={() => setPhase({ k: 'history' })} className="w-full max-w-sm rounded-lg bg-neutral-800 py-3 text-sm">
+            Rating history
+          </button>
         </main>
       )
     case 'loading':
@@ -94,7 +109,10 @@ export default function Session({ onGateLost }: { onGateLost: () => void }) {
         </div>
       )
     case 'summary':
-      return <Summary summary={phase.summary} onNew={() => setPhase({ k: 'idle' })} />
+      return <Summary summary={phase.summary} onNew={() => setPhase({ k: 'idle' })} onHistory={() => setPhase({ k: 'history' })} />
+    case 'history':
+      // Reached only from idle or the summary: no session is mid-clip, so leaving loses nothing.
+      return <History onBack={() => setPhase({ k: 'idle' })} onLost={lost} />
     case 'watching': {
       const { clip } = phase
       return (

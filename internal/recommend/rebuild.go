@@ -18,9 +18,21 @@ func LockRebuild(ctx context.Context, tx pgx.Tx) error {
 	return nil
 }
 
-// ReembedAll recomputes every clip embedding from its columns + vocab (docs/SCHEMA.md
-// § Rebuilds). Run it inside the transaction that changed the inputs, so a reader never sees
-// new tags with an old vector. Centroid rebuilds join here when user_taste exists (M4).
+// lockRebuildShared is LockRebuild's reader side, taken FIRST by Rate. Rates run concurrently
+// with each other but never with a rebuild, so (1) the vector a Rate subtracts is the one that
+// was added — a rebuild changes vectors and centroids together — and (2) a rebuild never
+// computes centroids from a feedback snapshot that misses a Rate committing under it.
+func lockRebuildShared(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtext('rebuild:embeddings'))`); err != nil {
+		return fmt.Errorf("locking embedding rebuild (shared): %w", err)
+	}
+	return nil
+}
+
+// ReembedAll recomputes every clip embedding from its columns + vocab, then every user's
+// centroids from the new vectors (docs/SCHEMA.md § Rebuilds). Run it inside the transaction
+// that changed the inputs, so a reader never sees new tags with an old vector, nor a centroid
+// that still averages the old ones.
 func ReembedAll(ctx context.Context, tx pgx.Tx) (int, error) {
 	// Without the lock, a rebuild that read old tags could commit after a tag load and
 	// overwrite its vectors with ones computed from the old tags.
@@ -79,5 +91,50 @@ func ReembedAll(ctx context.Context, tx pgx.Tx) (int, error) {
 			return 0, fmt.Errorf("updating embedding of %s: %w", c.id, err)
 		}
 	}
+	if err := rebuildTaste(ctx, tx, nil); err != nil {
+		return 0, err
+	}
 	return len(clips), nil
+}
+
+// rebuildTaste recomputes user_taste exactly from current ratings (the latest feedback_events
+// row per clip): positive = mean of the 'loved' vectors, negative = mean of the 'not_for_me'
+// ones. userID nil = every user. It also clears the float drift that online subtract-then-add
+// accumulates. The caller holds what keeps vectors still: LockRebuild (ReembedAll), or the
+// shared lock plus the user's new user_taste row (Rate).
+func rebuildTaste(ctx context.Context, tx pgx.Tx, userID *string) error {
+	// Reset first: a user whose directional ratings are all gone has no row in the upsert below.
+	if _, err := tx.Exec(ctx, `
+		UPDATE user_taste
+		   SET positive_centroid = NULL, negative_centroid = NULL,
+		       liked_count = 0, disliked_count = 0, updated_at = now()
+		 WHERE $1::uuid IS NULL OR user_id = $1`, userID); err != nil {
+		return fmt.Errorf("resetting taste: %w", err)
+	}
+	// AVG over no rows is NULL and count is 0 — exactly taste_*_chk. pgvector accumulates in
+	// float8.
+	if _, err := tx.Exec(ctx, `
+		WITH cur AS (
+		  SELECT DISTINCT ON (user_id, clip_id) user_id, clip_id, response
+		    FROM feedback_events
+		   WHERE $1::uuid IS NULL OR user_id = $1
+		   ORDER BY user_id, clip_id, created_at DESC, id DESC)
+		INSERT INTO user_taste (user_id, positive_centroid, negative_centroid, liked_count, disliked_count)
+		SELECT cur.user_id,
+		       AVG(c.embedding) FILTER (WHERE cur.response = 'loved'),
+		       AVG(c.embedding) FILTER (WHERE cur.response = 'not_for_me'),
+		       count(*) FILTER (WHERE cur.response = 'loved'),
+		       count(*) FILTER (WHERE cur.response = 'not_for_me')
+		  FROM cur JOIN clips c ON c.id = cur.clip_id
+		 WHERE cur.response <> 'okay'
+		 GROUP BY cur.user_id
+		ON CONFLICT (user_id) DO UPDATE
+		   SET positive_centroid = EXCLUDED.positive_centroid,
+		       negative_centroid = EXCLUDED.negative_centroid,
+		       liked_count = EXCLUDED.liked_count,
+		       disliked_count = EXCLUDED.disliked_count,
+		       updated_at = now()`, userID); err != nil {
+		return fmt.Errorf("rebuilding taste: %w", err)
+	}
+	return nil
 }

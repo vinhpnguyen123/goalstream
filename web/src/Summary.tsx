@@ -1,6 +1,6 @@
 import type { Summary as S } from './api'
 
-export default function Summary({ summary, onNew }: { summary: S; onNew: () => void }) {
+export default function Summary({ summary, onNew, onHistory }: { summary: S; onNew: () => void; onHistory: () => void }) {
   const rows: [string, number][] = [
     ['Rated', summary.rated], ['Loved', summary.loved], ['Okay', summary.okay], ['Not for me', summary.not_for_me],
   ]
@@ -16,6 +16,7 @@ export default function Summary({ summary, onNew }: { summary: S; onNew: () => v
         ))}
       </dl>
       <button onClick={onNew} className="w-full rounded-lg bg-emerald-600 py-3 font-medium">New session</button>
+      <button onClick={onHistory} className="w-full rounded-lg bg-neutral-800 py-3 text-sm">Rating history</button>
     </main>
   )
 }

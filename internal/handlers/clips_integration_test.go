@@ -20,6 +20,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/vinhpnguyen123/goalstream/internal/auth"
+	"github.com/vinhpnguyen123/goalstream/internal/config"
 	"github.com/vinhpnguyen123/goalstream/internal/db"
 	"github.com/vinhpnguyen123/goalstream/internal/recommend"
 	"github.com/vinhpnguyen123/goalstream/internal/storage"
@@ -73,7 +74,9 @@ func setupAPI(t *testing.T) apiEnv {
 	}
 	cfg.API = gateConfig()
 	cfg.API.AuthMode = "dev"
-	s := &Server{Pool: pool, Redis: rdb, Store: storage.New(cfg.S3), Cfg: cfg, DevUserID: dev}
+	cfg.Reco = config.RecoConfig{ExploreRate: 0.3, ColdStartThreshold: 5, TopK: 50, NegPenalty: 0.5}
+	s := &Server{Pool: pool, Redis: rdb, Store: storage.New(cfg.S3), Cfg: cfg, DevUserID: dev,
+		Reco: recommend.NewRecommender(pool, cfg.Reco, rand.New(rand.NewPCG(1, 2)))}
 	return apiEnv{s, s.Routes(), &http.Cookie{
 		Name: auth.InviteCookie, Value: auth.SignInvite(testSecret, "me", time.Now().Add(time.Hour)),
 	}}

@@ -39,6 +39,13 @@ func TestLoadDefaults(t *testing.T) {
 	if len(c.Ingest.Labels) != 1 || c.Ingest.Labels[0] != "Goal" {
 		t.Fatalf("labels default wrong: %v", c.Ingest.Labels)
 	}
+	if c.API.AccessTokenTTL != 15*time.Minute || c.API.RefreshTokenTTL != 168*time.Hour ||
+		c.API.RefreshReuseGrace != 30*time.Second {
+		t.Fatalf("token defaults wrong: %+v", c.API)
+	}
+	if c.Reco != (RecoConfig{ExploreRate: 0.3, ColdStartThreshold: 5, TopK: 50, NegPenalty: 0.5}) {
+		t.Fatalf("reco defaults wrong: %+v", c.Reco)
+	}
 }
 
 func TestLoadErrors(t *testing.T) {
@@ -68,6 +75,10 @@ func TestLoadErrors(t *testing.T) {
 		{"test insecure cookie", map[string]string{"APP_ENV": "test", "COOKIE_SECURE": "false"}, []string{"COOKIE_SECURE=false is refused"}},
 		{"invite without code", map[string]string{"INVITE_CODES": "me:abc,friend"}, []string{"INVITE_CODES entry 2 must be id:code"}},
 		{"invite id with separator", map[string]string{"INVITE_CODES": "a|b:abc"}, []string{"must not contain |"}},
+		{"bad float", map[string]string{"EXPLORE_RATE": "a lot"}, []string{"EXPLORE_RATE must be a number"}},
+		{"NaN float", map[string]string{"NEG_PENALTY": "NaN"}, []string{"NEG_PENALTY must be a number"}},
+		{"explore rate above 1", map[string]string{"EXPLORE_RATE": "1.5"}, []string{"EXPLORE_RATE must be in [0,1]"}},
+		{"top k zero", map[string]string{"RECO_TOP_K": "0"}, []string{"RECO_TOP_K 1–1000"}},
 		{"invite duplicate id", map[string]string{"INVITE_CODES": "me:abc,me:def"}, []string{`duplicate id "me"`}},
 	}
 	for _, tc := range cases {
@@ -111,7 +122,10 @@ func TestValidateAPI(t *testing.T) {
 		{"dev with gate", map[string]string{"AUTH_MODE": "dev", "INVITE_CODES": "me:abc", "INVITE_SECRET": secret}, ""},
 		{"closed, gate off", map[string]string{"AUTH_MODE": "closed", "GATE_ENABLED": "false"}, ""},
 		{"no auth mode", map[string]string{"GATE_ENABLED": "false"}, "AUTH_MODE is required"},
-		{"jwt before M4", map[string]string{"AUTH_MODE": "jwt", "GATE_ENABLED": "false"}, "dev or closed until M4"},
+		{"jwt without secret", map[string]string{"AUTH_MODE": "jwt", "GATE_ENABLED": "false"}, "JWT_SECRET must be at least 32 bytes"},
+		{"jwt short secret", map[string]string{"AUTH_MODE": "jwt", "GATE_ENABLED": "false", "JWT_SECRET": strings.Repeat("s", 31)}, "JWT_SECRET must be at least 32 bytes"},
+		{"jwt", map[string]string{"AUTH_MODE": "jwt", "GATE_ENABLED": "false", "JWT_SECRET": secret}, ""},
+		{"unknown auth mode", map[string]string{"AUTH_MODE": "basic", "GATE_ENABLED": "false"}, "dev, closed or jwt"},
 		{"gate without codes", map[string]string{"AUTH_MODE": "dev", "INVITE_SECRET": secret}, "INVITE_CODES is required"},
 		{"short secret", map[string]string{"AUTH_MODE": "dev", "INVITE_CODES": "me:abc", "INVITE_SECRET": "short"}, "at least 32 bytes"},
 	}
