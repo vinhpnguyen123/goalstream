@@ -115,3 +115,15 @@ export const playURL = (clipId: string, mp4 = false) =>
 export const sendFeedback = (b: {
   session_id: string; clip_id: string; response: Rating; replay_count: number; watched_full: boolean
 }) => api<{ changed: boolean; previous?: Rating | null }>('/feedback', { method: 'POST', body: JSON.stringify(b) })
+
+export type CurrentRating = { clip_id: string; title: string; response: Rating; rated_at: string }
+
+export const listRatings = (cursor?: string) =>
+  api<{ items: CurrentRating[]; next_cursor: string | null }>(
+    '/ratings?limit=20' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''))
+
+// putRating re-rates from the history screen, outside any session. Idempotent by state.
+export const putRating = (clipId: string, response: Rating) =>
+  api<{ changed: boolean; previous?: Rating | null }>(`/ratings/${clipId}`, {
+    method: 'PUT', body: JSON.stringify({ response }),
+  })

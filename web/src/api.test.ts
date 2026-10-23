@@ -86,4 +86,23 @@ describe('api', () => {
     await logout()
     expect(signedIn()).toBe(false)
   })
+
+  it('listRatings pages with an encoded cursor; putRating sends PUT {response}', async () => {
+    let seen: { url: string; init: RequestInit } | undefined
+    vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+      seen = { url, init }
+      return json(200, { data: { items: [], next_cursor: null, changed: true } })
+    })
+    const { listRatings, putRating } = await import('./api')
+
+    await listRatings()
+    expect(seen?.url).toBe('/api/v1/ratings?limit=20')
+    await listRatings('a+b/c=')
+    expect(seen?.url).toBe('/api/v1/ratings?limit=20&cursor=a%2Bb%2Fc%3D')
+
+    await putRating('clip-1', 'okay')
+    expect(seen?.url).toBe('/api/v1/ratings/clip-1')
+    expect(seen?.init.method).toBe('PUT')
+    expect(seen?.init.body).toBe('{"response":"okay"}')
+  })
 })
