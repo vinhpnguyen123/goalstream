@@ -47,6 +47,10 @@ ingest-tags: ## apply the hand-filled $(TAGS_TODO_PATH) (tags separated by |), t
 reembed: ## rebuild every clip embedding from its columns + vocab
 	go run ./cmd/ingest reembed
 
+.PHONY: latency
+latency: ## p50/p95 of GET /next over 1000 warm requests (needs `make api` in AUTH_MODE=dev)
+	@INVITE_CODE=$$(echo "$(INVITE_CODES)" | cut -d, -f1 | cut -d: -f2-) scripts/next_latency.sh
+
 .PHONY: admin
 admin: ## grant is_admin: make admin EMAIL=me@x.com   (REVOKE=1 to demote)
 	go run ./cmd/ingest admin -email "$(EMAIL)" $(if $(REVOKE),-revoke)
