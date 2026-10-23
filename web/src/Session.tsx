@@ -18,21 +18,31 @@ const RATINGS: [Rating, string][] = [['loved', 'Loved it'], ['okay', 'Okay'], ['
 
 // Session is the viewing loop: start → next → play → rate or skip → next … → summary.
 // The exclude list (served but not rated) lives here, in component state (CONVENTIONS).
-export default function Session({ onGateLost }: { onGateLost: () => void }) {
+export default function Session({ onGateLost, onSignedOut }: { onGateLost: () => void; onSignedOut: () => void }) {
   const [phase, setPhase] = useState<Phase>({ k: 'idle' })
   const [exclude, setExclude] = useState<string[]>([])
   const session = useRef('')
   const stats = useRef({ watchedFull: false, replays: 0 })
   const lastStep = useRef<() => Promise<void>>(async () => {})
 
-  // run wraps every API step: gate_required → invite screen; anything else → an error with a
-  // Retry that runs the same step again. A media failure never lands here — the Player skips
-  // those silently. Retrying a rate after its feedback landed is safe: feedback is idempotent.
+  // lost handles the two errors no Retry can fix: gate_required → invite screen; unauthorized
+  // (the refresh already failed) → sign-in screen.
+  function lost(err: unknown) {
+    if (!(err instanceof ApiError)) return false
+    if (err.type === 'gate_required') onGateLost()
+    else if (err.type === 'unauthorized') onSignedOut()
+    else return false
+    return true
+  }
+
+  // run wraps every API step: lost() first; anything else → an error with a Retry that runs the
+  // same step again. A media failure never lands here — the Player skips those silently.
+  // Retrying a rate after its feedback landed is safe: feedback is idempotent.
   function run(step: () => Promise<void>) {
     lastStep.current = step
     setPhase({ k: 'loading' })
     step().catch((err) => {
-      if (err instanceof ApiError && err.type === 'gate_required') return onGateLost()
+      if (lost(err)) return
       setPhase({ k: 'error', message: err instanceof ApiError ? err.message : 'Something went wrong.' })
     })
   }
@@ -71,7 +81,7 @@ export default function Session({ onGateLost }: { onGateLost: () => void }) {
 
   // /play itself failed (not the media). Retry remounts the Player for the same clip.
   function playFailed(clip: Clip, err: unknown) {
-    if (err instanceof ApiError && err.type === 'gate_required') return onGateLost()
+    if (lost(err)) return
     lastStep.current = async () => setPhase({ k: 'watching', clip })
     setPhase({ k: 'error', message: err instanceof ApiError ? err.message : 'Something went wrong.' })
   }

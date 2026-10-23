@@ -12,19 +12,30 @@ export class ApiError extends Error {
   }
 }
 
-// api returns the envelope's `data`, or throws ApiError. The gs_invite cookie is HttpOnly and
-// same-origin: the browser sends it, JS never sees it.
-export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+// The access token lives in memory only (CONVENTIONS): a reload drops it, and the HttpOnly
+// gs_refresh cookie gets a new one on the first 401. AUTH_MODE=dev never issues one.
+let accessToken: string | null = null
+let refreshing: Promise<void> | null = null
+
+export const signedIn = () => accessToken !== null
+
+// call is one request: the envelope's `data`, or ApiError. The gs_invite and gs_refresh cookies
+// are HttpOnly and same-origin: the browser sends them, JS never sees them.
+async function call<T>(path: string, init: RequestInit): Promise<T> {
   let res: Response
   try {
     res = await fetch('/api/v1' + path, {
       ...init,
-      headers: { 'Content-Type': 'application/json', ...init.headers },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(accessToken && { Authorization: 'Bearer ' + accessToken }),
+        ...init.headers,
+      },
     })
   } catch {
     throw new ApiError(0, 'network', 'Could not reach the server.')
   }
-  if (res.status === 204) return undefined as T // POST /gate: success carries no body
+  if (res.status === 204) return undefined as T // POST /gate, /auth/logout: no body
   const body = await res.json().catch(() => null)
   if (!res.ok || body === null) {
     throw new ApiError(res.status, body?.error?.type ?? 'network', body?.error?.message ?? 'Something went wrong.')
@@ -32,11 +43,52 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   return body.data as T
 }
 
+// refresh is single-flight: every caller that hits a 401 while one is in flight shares it, so
+// two tabs' worth of requests (or StrictMode's double mount) spend one rotation, not several.
+// A failed refresh rethrows its own error, so gate_required still reaches the invite screen.
+function refresh(): Promise<void> {
+  refreshing ??= call<Token>('/auth/refresh', { method: 'POST' })
+    .then((t) => { accessToken = t.access_token })
+    .catch((err) => { accessToken = null; throw err })
+    .finally(() => { refreshing = null })
+  return refreshing
+}
+
+// api is call plus auth: an `unauthorized` outside /auth/* refreshes once and retries once.
+// The retry never refreshes again, so a token the server keeps rejecting cannot loop.
+export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const sent = accessToken
+  try {
+    return await call<T>(path, init)
+  } catch (err) {
+    if (!(err instanceof ApiError && err.type === 'unauthorized') || path.startsWith('/auth/')) throw err
+  }
+  // Another caller already refreshed while this request was in flight: just retry with its token.
+  if (accessToken === sent) await refresh()
+  return call<T>(path, init)
+}
+
+type Token = { access_token: string; expires_in: number }
+
+export async function login(email: string, password: string) {
+  accessToken = (await api<Token>('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) })).access_token
+}
+
+export const register = (email: string, password: string, display_name?: string) =>
+  api<unknown>('/auth/register', { method: 'POST', body: JSON.stringify({ email, password, display_name }) })
+
+// logout drops the token even when the request fails: the user asked to be signed out here.
+export async function logout() {
+  accessToken = null
+  await api<unknown>('/auth/logout', { method: 'POST' }).catch(() => {})
+}
+
 export const enterInvite = (code: string) =>
   api<unknown>('/gate', { method: 'POST', body: JSON.stringify({ code }) })
 
-// probe answers whether the gate lets us through. ponytail: GET /clips?limit=1 doubles as the
-// check — the endpoint set is closed, so no /me until M4 brings one.
+// probe answers whether the gate and auth let us through; on a fresh page load its 401 is what
+// triggers the refresh. ponytail: GET /clips?limit=1 doubles as the check — the endpoint set is
+// closed, there is no /me.
 export const probe = () => api<unknown>('/clips?limit=1')
 
 export type Clip = { id: string; title: string; match_minute: number; event_type: string; source_type: string }
