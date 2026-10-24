@@ -8,7 +8,7 @@ services:
     name: goalstream-api
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: free # sleeps when idle; fine for a gated skeleton, revisit at M4.5
+    plan: free # sleeps when idle (cold start); kept free at M4.5, baselines are measured warm
     branch: main
     autoDeployTrigger: checksPass # deploy only after the GitHub CI run is green
     healthCheckPath: /api/v1/healthz
@@ -64,6 +64,6 @@ services:
 
 databases:
   - name: goalstream-db
-    plan: free # expires after 30 days on Render's free tier — upgrade before M4.5
+    plan: free # expires 30 days after creation: `make prod-dump` before, `make prod-restore` into the new one
     postgresMajorVersion: "16"
     ipAllowList: [] # internal connections only
