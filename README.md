@@ -232,8 +232,9 @@ auth, rate limiter), local Postgres 16 + pgvector 0.8.7, Apple M1, measured 2026
 | Catalogue | p50 | p95 | max | Modes served |
 |---|---|---|---|---|
 | 21 clips | 6.6 ms | 18.2 ms | 231.9 ms | 695 exploit · 305 explore |
+| 88 clips (2026-10-24, M4.5) | 7.2 ms | 16.7 ms | 2867.7 ms (one outlier) | 712 exploit · 288 explore |
 
-To re-measure at M4.5 with the full catalogue (88 clips).
+Four times the catalogue moved p50 by 0.6 ms: below ~1000 clips the exact scan is not the cost.
 
 **What I learned.** _(to write in my own words)_
 
@@ -255,3 +256,74 @@ To re-measure at M4.5 with the full catalogue (88 clips).
 | A maintained current-ratings table: `GET /ratings` computes every current rating, then pages | a user has thousands of ratings |
 | History reachable mid-session: only from the start and summary screens | users want to fix a rating while watching |
 | A single centroid per sign: it cannot represent multi-modal taste | a user loves two unrelated kinds of goals and the mean lands between them |
+
+### M4.5 — Phase A content in production (`m4.5-deployed`)
+
+**What it does.** The production app now has the full catalogue: 88 goal clips from 23 matches
+(2016-17, five competitions), as MP4 in Cloudflare R2, indexed in Render Postgres. Production is
+single-viewer under the dataset NDA — one invite code, one account — and stays MP4; adaptive
+streaming (Phase B) is built and demonstrated locally only.
+
+**How it works.**
+
+- *MinIO → R2 is config only.* `cmd/ingest` runs on my laptop against production with a
+  gitignored `.env.prod`; not a line of Go changed. `scripts/prod.sh` runs a command with **only**
+  `.env.prod` in its environment (`env -i`): the Makefile exports the local `.env`, so a variable
+  missing from `.env.prod` would otherwise silently fall back to its local value — `APP_ENV=dev`,
+  the local bucket. Now it fails config instead.
+- *The production database admits no external connection.* For an ingest I allow-list my IP for
+  the duration of the run and remove it after.
+- *Free-tier Postgres expires after 30 days.* It is kept by `make prod-dump` before expiry and
+  `make prod-restore` into the new one — not by re-ingesting, which would mint new clip ids,
+  orphan every object in R2 and lose tags, ratings and the account. The dump/restore run in the
+  `pgvector:pg16` image to match the server: a newer local `pg_dump` writes settings PG16 rejects.
+- *Tags.* `penalty`, `late_goal` (≥ 85'), `equaliser` and `winner` are derived from the
+  annotations (a missed penalty followed by a later goal stays untagged). The shot-type tags
+  (`header`, `long_range`, `volley`, …) were **assigned by an AI model from extracted frames,
+  not by hand, and are unverified** — `counter`, `team_move` and `deflection` are the least
+  reliable.
+
+**Baselines for Phase B** — time-to-first-frame (src assigned → first `playing`, or from the tap
+when autoplay is blocked) and stalls (`waiting` after the first frame, seeks excluded), measured
+with `scripts/ttff.js` pasted into the console. Warm API (the free Render instance sleeps; a cold
+start adds up to a minute to the first request and is not a delivery property).
+
+| Device | Network | Clips | TTFF p50 | TTFF p95 | Stalls |
+|---|---|---|---|---|---|
+| Desktop Chrome (Mac, home broadband, 2026-10-25) | no throttling | 10 | 618 ms | 1180 ms (= max at n=10) | 0 |
+| Desktop Chrome (same machine, same day) | DevTools "Slow 4G" | 10 | 3540 ms | 3957 ms (= max) | 28 — every clip, 2–4 each, 52.4 s total |
+
+> **Why Phase B exists — measured, not assumed.**
+>
+> On a fast link MP4 is fine: first frame in ~0.6 s, zero stalls. On Slow 4G **every one of the
+> 10 clips stalled, 2–4 times each, 52 seconds of frozen video in total**, and the first frame
+> took ~5.7× longer (p50 618 ms → 3540 ms).
+>
+> The cause is structural, not a bug: each clip exists as **one** MP4 at the broadcast's bitrate
+> (~2.8–3.2 Mbps). When the link is slower than the file, the player has no smaller version to
+> switch to — it can only stop and wait. More caching, a CDN or a faster server do not change
+> that; the bytes per second of video are fixed.
+>
+> Phase B (M5–M9) removes that constraint on the running app, per clip and reversibly: an
+> HLS ladder of renditions (never above the source, ceilings 5.0 / 3.0 / 1.4 / 0.7 Mbps) cut into
+> 4-second segments, so the player drops to a rung that fits the link and trades picture for
+> continuity. **The success criterion is this table:** re-run `scripts/ttff.js` unchanged on
+> Slow 4G against the HLS version of the same clips — stalls should approach zero and the first
+> frame should arrive sooner.
+
+Not measured: iPhone (Wi-Fi, cellular), and a full session on a real phone — the M4.5
+"works on a phone over the public internet" criterion was waived (2026-10-25). The only phone
+check so far is a phone-sized viewport in DevTools (M2).
+
+**What I learned.** _(to write in my own words)_
+
+**What I chose not to build — and when that choice would be wrong.**
+
+| Not built | Would be wrong when |
+|---|---|
+| Ingest in CI or on a server: it runs from my laptop | more than one person ingests, or the source data cannot sit on a laptop |
+| A paid database: free tier + monthly dump/restore | missing a dump loses real users' data, or downtime during restore matters |
+| Playback telemetry (real-user TTFF and stalls): baselines are measured by hand | there are real viewers whose experience I cannot sit next to |
+| A CDN or custom domain in front of R2: presigned URLs hit R2 directly | viewers are far from R2's region, or the same clips are watched often enough to cache |
+| Hand-verified shot-type tags | recommendations are judged on tag quality, or tags are shown to users |
+| An always-on API instance: the free one sleeps | the cold start (up to a minute) is felt by someone other than me |
