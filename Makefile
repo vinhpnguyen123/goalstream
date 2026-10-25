@@ -54,3 +54,22 @@ latency: ## p50/p95 of GET /next over 1000 warm requests (needs `make api` in AU
 .PHONY: admin
 admin: ## grant is_admin: make admin EMAIL=me@x.com   (REVOKE=1 to demote)
 	go run ./cmd/ingest admin -email "$(EMAIL)" $(if $(REVOKE),-revoke)
+
+# --- production (M4.5): cmd/ingest run from this laptop against R2 + Render Postgres -------
+# Every target reads ONLY .env.prod (gitignored) via scripts/prod.sh. Render's Postgres admits
+# external connections only from the allow-listed IP: add yours before, remove it after.
+.PHONY: prod-migrate prod-run prod-tags prod-reembed prod-dump prod-restore
+prod-migrate prod-run prod-tags prod-reembed: prod-%:
+	scripts/prod.sh go run ./cmd/ingest $*
+
+# pg_dump/pg_restore from the pg16 image: matches Render's server (a newer local pg_dump writes
+# settings PG16 rejects). Dumps hold password and token hashes — backups/ is gitignored.
+PG16 = docker run --rm -e DATABASE_URL -v "$(CURDIR)/backups:/backups" pgvector/pgvector:pg16
+
+prod-dump: ## dump production into backups/ — run before the free DB expires (30 days)
+	@mkdir -p backups
+	scripts/prod.sh sh -c '$(PG16) pg_dump --format=custom --no-owner --no-acl --file=/backups/prod-$$(date +%Y%m%d-%H%M%S).dump "$$DATABASE_URL"'
+
+prod-restore: ## restore a dump into the (new) production DB: make prod-restore DUMP=backups/prod-….dump
+	@test -f "$(DUMP)" || { echo "DUMP=backups/<file>.dump required"; exit 1; }
+	scripts/prod.sh sh -c '$(PG16) pg_restore --clean --if-exists --no-owner --no-acl --exit-on-error --dbname="$$DATABASE_URL" /backups/$(notdir $(DUMP))'

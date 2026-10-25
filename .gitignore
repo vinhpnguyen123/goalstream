@@ -5,7 +5,8 @@
 /mezzanine/
 /testdata/
 /minio-data/
-/tags_todo.csv
+/tags_todo*.csv
+/backups/
 **/hls/**/*.ts
 **/hls/**/*.m3u8
 
