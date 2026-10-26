@@ -22,6 +22,7 @@ type Probe struct {
 	Width      int
 	Height     int
 	VideoBps   int // first video stream's bit_rate
+	AudioBps   int // first audio stream's bit_rate
 	FormatBps  int // whole-container bit_rate
 	DurationMS int
 }
@@ -82,7 +83,9 @@ func parseProbe(data []byte) (Probe, error) {
 				p.HasVideo, p.Width, p.Height, p.VideoBps = true, s.Width, s.Height, atoi(s.BitRate)
 			}
 		case "audio":
-			p.HasAudio = true
+			if !p.HasAudio {
+				p.HasAudio, p.AudioBps = true, atoi(s.BitRate)
+			}
 		}
 	}
 	p.FormatBps = atoi(o.Format.BitRate)

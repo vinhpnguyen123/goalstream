@@ -61,8 +61,9 @@ func RawClient(c config.S3Config, endpoint string) *s3.Client {
 	})
 }
 
-// PutFile uploads a local file to key.
-func (c *Client) PutFile(ctx context.Context, key, path, contentType string) error {
+// PutFile uploads a local file to key. cacheControl is sent when non-empty: everything under an
+// HLS version prefix is immutable and says so.
+func (c *Client) PutFile(ctx context.Context, key, path, contentType, cacheControl string) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("opening %s: %w", path, err)
@@ -74,13 +75,17 @@ func (c *Client) PutFile(ctx context.Context, key, path, contentType string) err
 	}
 	ctx, cancel := context.WithTimeout(ctx, putTimeout)
 	defer cancel()
-	_, err = c.s3.PutObject(ctx, &s3.PutObjectInput{
+	in := &s3.PutObjectInput{
 		Bucket:        aws.String(c.bucket),
 		Key:           aws.String(key),
 		Body:          f, // an *os.File is seekable, so the SDK can sign the payload
 		ContentLength: aws.Int64(st.Size()),
 		ContentType:   aws.String(contentType),
-	})
+	}
+	if cacheControl != "" {
+		in.CacheControl = aws.String(cacheControl)
+	}
+	_, err = c.s3.PutObject(ctx, in)
 	if err != nil {
 		return fmt.Errorf("uploading %s: %w", key, err)
 	}

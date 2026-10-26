@@ -29,7 +29,7 @@ func TestPutPresignGetAndRange(t *testing.T) {
 		t.Fatal(err)
 	}
 	key := "clips/test-clip/original.mp4"
-	if err := c.PutFile(ctx, key, path, "video/mp4"); err != nil {
+	if err := c.PutFile(ctx, key, path, "video/mp4", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -99,7 +99,7 @@ func TestExpiredPresignIsRejected(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "x.mp4")
 	os.WriteFile(path, []byte("x"), 0o600)
-	if err := c.PutFile(ctx, "clips/x/original.mp4", path, "video/mp4"); err != nil {
+	if err := c.PutFile(ctx, "clips/x/original.mp4", path, "video/mp4", ""); err != nil {
 		t.Fatal(err)
 	}
 	signed, _, err := c.PresignGet(ctx, "clips/x/original.mp4")
@@ -123,7 +123,7 @@ func TestObjectsAreNotPublic(t *testing.T) {
 	c := storage.New(cfg.S3)
 	path := filepath.Join(t.TempDir(), "x.mp4")
 	os.WriteFile(path, []byte("x"), 0o600)
-	if err := c.PutFile(ctx, "clips/y/original.mp4", path, "video/mp4"); err != nil {
+	if err := c.PutFile(ctx, "clips/y/original.mp4", path, "video/mp4", ""); err != nil {
 		t.Fatal(err)
 	}
 	resp, err := http.Get(cfg.S3.PublicEndpoint + "/" + cfg.S3.Bucket + "/clips/y/original.mp4")
@@ -144,7 +144,7 @@ func TestOpenSizeAndMissing(t *testing.T) {
 	body := bytes.Repeat([]byte("0123456789"), 100)
 	path := filepath.Join(t.TempDir(), "o.mp4")
 	os.WriteFile(path, body, 0o600)
-	if err := c.PutFile(ctx, "clips/o/original.mp4", path, "video/mp4"); err != nil {
+	if err := c.PutFile(ctx, "clips/o/original.mp4", path, "video/mp4", ""); err != nil {
 		t.Fatal(err)
 	}
 	read := func(rng string) []byte {

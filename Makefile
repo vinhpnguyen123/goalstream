@@ -30,9 +30,13 @@ test-integration: ## needs `make up`. -p 1: packages share goalstream_test and t
 fixtures: ## generate synthetic test media into testdata/ (never real footage)
 	scripts/fixtures.sh
 
-.PHONY: api fe
+.PHONY: api fe worker
 api: ## run the API (migrates first)
 	go run ./cmd/api
+
+worker: ## run one transcode job: make worker JOB=<job_id>  (the queue loop arrives in M6)
+	@test -n "$(JOB)" || { echo "JOB=<job_id> required"; exit 1; }
+	go run ./cmd/worker -once $(JOB)
 
 fe: ## frontend dev server on :5173, proxies /api to the API (run `npm ci` in web/ once)
 	cd web && npm run dev
