@@ -27,6 +27,7 @@ var (
 	RuleGate       = Rule{"gate", 10, time.Minute, true}
 	RuleGateGlobal = Rule{"gate_global", 100, time.Minute, true}
 	RulePlay       = Rule{"play", 60, time.Minute, false}
+	RuleAdmin      = Rule{"admin", 30, time.Minute, false}
 	RuleLogin      = Rule{"login", 10, time.Minute, true}
 	RuleLoginEmail = Rule{"login_email", 5, time.Minute, true} // keyed after decode: Allow
 	RuleRegister   = Rule{"register", 5, time.Hour, true}

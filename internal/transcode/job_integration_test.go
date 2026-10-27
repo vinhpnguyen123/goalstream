@@ -607,3 +607,76 @@ func equalInts(a, b []int) bool {
 	}
 	return true
 }
+
+// Rollback and a fenced commit racing on one clip, in both orders: rollback always wins — if
+// the commit lands first the rollback flips it back, if the rollback lands first the commit is
+// fenced out — and the two never deadlock (jobs are locked before the clip in both). -race, 3×.
+func TestRollbackRacesCommit(t *testing.T) {
+	ctx := context.Background()
+	e := setupJobs(t)
+	for i := 0; i < 20; i++ {
+		clipID, _ := e.clip(t, "")
+		a, err := Claim(ctx, e.pool, e.job(t, clipID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		res := Result{Renditions: []Rendition{{Rung: Rung{Height: 360, VideoBps: 600_000}, Width: 640, Segments: 15}},
+			ThumbKey: "clips/" + clipID + "/hls/" + a.Version + "/thumb.jpg"}
+		var wg sync.WaitGroup
+		var commitErr, rollbackErr error
+		wg.Add(2)
+		go func() { defer wg.Done(); commitErr = Commit(ctx, e.pool, a, res) }()
+		go func() { defer wg.Done(); _, rollbackErr = SetDelivery(ctx, e.pool, clipID, "") }()
+		wg.Wait()
+		if rollbackErr != nil || (commitErr != nil && !errors.Is(commitErr, ErrSuperseded)) {
+			t.Fatalf("round %d: commit %v, rollback %v", i, commitErr, rollbackErr)
+		}
+		if st, ver := e.delivery(t, clipID); st != "mp4" {
+			t.Fatalf("round %d: clip %s/%s — the rollback lost", i, st, ver)
+		}
+	}
+}
+
+// A job inserted but not yet committed when a rollback starts (CreateJob in flight): the
+// rollback waits for it and cancels it. Without the per-clip lock the cancel cannot see the
+// uncommitted row, the job commits queued, and running it later undoes the rollback.
+func TestRollbackWaitsForAnUncommittedJob(t *testing.T) {
+	ctx := context.Background()
+	e := setupJobs(t)
+	clipID, _ := e.clip(t, "")
+
+	tx, err := e.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if err := lockClipJobs(ctx, tx, clipID); err != nil { // exactly what CreateJob holds
+		t.Fatal(err)
+	}
+	var jobID string
+	if err := tx.QueryRow(ctx, `INSERT INTO transcode_jobs (clip_id) VALUES ($1) RETURNING id::text`, clipID).Scan(&jobID); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() { _, err := SetDelivery(ctx, e.pool, clipID, ""); done <- err }()
+	select {
+	case err := <-done:
+		t.Fatalf("rollback finished (%v) while a job insert was still uncommitted", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("rollback still blocked after the insert committed")
+	}
+	if j := e.jobRow(t, jobID); j.Status != "failed" || j.Reason != "manual" {
+		t.Fatalf("job = %+v: the rollback missed the job created alongside it", j)
+	}
+}

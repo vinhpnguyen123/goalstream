@@ -12,15 +12,16 @@ import (
 
 var ErrNotFound = errors.New("not found")
 
-// ClipSummary is one row of GET /clips (docs/API.md). thumbnail_url arrives with
-// clips.thumbnail_key in M5.
+// ClipSummary is one row of GET /clips (docs/API.md).
 type ClipSummary struct {
-	ID          string    `json:"id"`
-	Title       string    `json:"title"`
-	MatchMinute int       `json:"match_minute"`
-	EventType   string    `json:"event_type"`
-	SourceType  string    `json:"source_type"`
-	CreatedAt   time.Time `json:"-"` // the cursor's half; not part of the response
+	ID           string    `json:"id"`
+	Title        string    `json:"title"`
+	MatchMinute  int       `json:"match_minute"`
+	EventType    string    `json:"event_type"`
+	SourceType   string    `json:"source_type"`
+	ThumbnailURL string    `json:"thumbnail_url,omitempty"` // presigned by the handler from ThumbnailKey
+	ThumbnailKey string    `json:"-"`                       // "" until a transcode commits one
+	CreatedAt    time.Time `json:"-"`                       // the cursor's half; not part of the response
 }
 
 // Cursor is the keyset position: the last row a page returned.
@@ -38,7 +39,7 @@ func ListClips(ctx context.Context, pool *pgxpool.Pool, after *Cursor, limit int
 		at, id = &after.CreatedAt, &after.ID
 	}
 	rows, err := pool.Query(ctx, `
-		SELECT id::text, title, match_minute, event_type, source_type, created_at
+		SELECT id::text, title, match_minute, event_type, source_type, coalesce(thumbnail_key, ''), created_at
 		  FROM clips
 		 WHERE $1::timestamptz IS NULL OR (created_at, id) < ($1, $2::uuid)
 		 ORDER BY created_at DESC, id DESC
@@ -48,7 +49,7 @@ func ListClips(ctx context.Context, pool *pgxpool.Pool, after *Cursor, limit int
 	}
 	out := []ClipSummary{}
 	var c ClipSummary
-	_, err = pgx.ForEachRow(rows, []any{&c.ID, &c.Title, &c.MatchMinute, &c.EventType, &c.SourceType, &c.CreatedAt},
+	_, err = pgx.ForEachRow(rows, []any{&c.ID, &c.Title, &c.MatchMinute, &c.EventType, &c.SourceType, &c.ThumbnailKey, &c.CreatedAt},
 		func() error { out = append(out, c); return nil })
 	if err != nil {
 		return nil, fmt.Errorf("listing clips: %w", err)
@@ -56,14 +57,23 @@ func ListClips(ctx context.Context, pool *pgxpool.Pool, after *Cursor, limit int
 	return out, nil
 }
 
-// ClipPlayback returns what /play needs to build a URL. Missing → ErrNotFound.
-func ClipPlayback(ctx context.Context, pool *pgxpool.Pool, id string) (prefix, sourceType string, err error) {
-	err = pool.QueryRow(ctx, `SELECT s3_prefix, source_type FROM clips WHERE id = $1`, id).Scan(&prefix, &sourceType)
+// Playback is what /play needs to build a URL.
+type Playback struct {
+	Prefix     string // clips/<id>/
+	SourceType string // mp4 | hls
+	HLSVersion string // the live version when hls; may also be set on an mp4 clip (rollback target)
+}
+
+// ClipPlayback reads a clip's delivery state. Missing → ErrNotFound.
+func ClipPlayback(ctx context.Context, pool *pgxpool.Pool, id string) (Playback, error) {
+	var p Playback
+	err := pool.QueryRow(ctx, `SELECT s3_prefix, source_type, coalesce(hls_version::text, '') FROM clips WHERE id = $1`,
+		id).Scan(&p.Prefix, &p.SourceType, &p.HLSVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", ErrNotFound
+		return Playback{}, ErrNotFound
 	}
 	if err != nil {
-		return "", "", fmt.Errorf("reading clip %s: %w", id, err)
+		return Playback{}, fmt.Errorf("reading clip %s: %w", id, err)
 	}
-	return prefix, sourceType, nil
+	return p, nil
 }

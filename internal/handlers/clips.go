@@ -62,6 +62,17 @@ func (s *Server) listClips(w http.ResponseWriter, r *http.Request) {
 		c := encodeCursor(db.Cursor{CreatedAt: last.CreatedAt, ID: last.ID})
 		next = &c
 	}
+	for i := range items {
+		if items[i].ThumbnailKey == "" {
+			continue
+		}
+		u, _, err := s.Store.PresignGet(r.Context(), items[i].ThumbnailKey) // offline computation
+		if err != nil {
+			httpx.Internal(w, r, err)
+			return
+		}
+		items[i].ThumbnailURL = u
+	}
 	httpx.JSON(w, r, http.StatusOK, map[string]any{"items": items, "next_cursor": next})
 }
 
@@ -80,7 +91,7 @@ func (s *Server) playClip(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, http.StatusNotFound, "not_found", "clip not found") // a malformed id names no clip
 		return
 	}
-	prefix, _, err := db.ClipPlayback(r.Context(), s.Pool, id)
+	pb, err := db.ClipPlayback(r.Context(), s.Pool, id)
 	if errors.Is(err, db.ErrNotFound) {
 		httpx.Error(w, r, http.StatusNotFound, "not_found", "clip not found")
 		return
@@ -88,13 +99,19 @@ func (s *Server) playClip(w http.ResponseWriter, r *http.Request) {
 		httpx.Internal(w, r, err)
 		return
 	}
-	// ponytail: M1 has only mp4 clips; M5 adds the hls branch on source_type + hls_version.
-	url, exp, err := s.Store.PresignGet(r.Context(), prefix+"original.mp4")
+	// ?format=mp4 always reaches the original, whatever source_type says: the player's
+	// structural fallback (L3) when an hls version fails. Only the master is presigned — the
+	// player resolves renditions and segments relative to it (§8 "PRESIGNING HLS, AND ITS LIMIT").
+	typ, key := "mp4", pb.Prefix+"original.mp4"
+	if pb.SourceType == "hls" && r.URL.Query().Get("format") != "mp4" {
+		typ, key = "hls", pb.Prefix+"hls/"+pb.HLSVersion+"/master.m3u8"
+	}
+	url, exp, err := s.Store.PresignGet(r.Context(), key)
 	if err != nil {
 		httpx.Internal(w, r, err)
 		return
 	}
-	httpx.JSON(w, r, http.StatusOK, map[string]any{"type": "mp4", "url": url, "expires_at": exp.UTC()})
+	httpx.JSON(w, r, http.StatusOK, map[string]any{"type": typ, "url": url, "expires_at": exp.UTC()})
 }
 
 // The cursor is opaque to clients: base64url(created_at RFC3339Nano | id).
