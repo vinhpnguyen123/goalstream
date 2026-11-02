@@ -438,3 +438,94 @@ exercised by hand, and nothing was tested on an iPhone.
 | Testing native HLS (iOS Safari) | iPhones are expected viewers — it needs the stream reachable off-localhost, i.e. M9's access control |
 | Thumbnails in the UI: `/clips` returns `thumbnail_url`, nothing renders it | a clip list or a poster image is built |
 | Deploying any of it | real viewers need adaptive streaming in production (M4.5) |
+
+### M6 — async transcoding pipeline (`m6-pipeline`)
+
+**What it does.** Transcoding runs in the background: `POST /admin/clips/{id}/transcode` queues a
+job and returns at once, a long-running worker takes it from Redis, and the clip switches to HLS
+when the job commits. The worker survives being killed at any point: a crash, a `kill -9`, a
+deploy's SIGTERM, a lost Redis push or a flushed Redis never lose a job, never publish one twice,
+and never change bytes a viewer may be playing. `GET /admin/clips/{id}/status` shows where a clip
+points, its newest job and every committed version. Local only, like all of Phase B.
+
+**How it works.** Redis is the fast path; Postgres is the record. Every queued job is a
+`transcode_jobs` row, and anything Redis loses is rebuilt from Postgres.
+
+- *Queue* (`internal/transcode/queue.go`): the API inserts the row, **then** `LPUSH`es its id —
+  if the push fails the API still answers 202, the row is the job. The worker `BLMOVE`s ids from
+  `transcode:queue` to `transcode:processing` (5 s blocks, so a shutdown is noticed between jobs;
+  exponential backoff to 30 s while Redis is down), runs the M5 claim → attempt → fenced commit,
+  and `LREM`s the entry whatever happened — Postgres says what comes next.
+- *Duplicates are harmless by construction*: the claim is a guarded `UPDATE … WHERE status IN
+  ('queued','retryable')`, so of two workers holding the same id exactly one gets the row; the
+  other drops its entry.
+- *Shutdown* (`Loop.Run`): SIGTERM stops new `BLMOVE`s; the job in hand runs on a context cancelled
+  `SHUTDOWN_GRACE` later, which kills ffmpeg (`exec.CommandContext`) and records the job
+  `retryable` with reason `shutdown` **and its attempt given back** — three deploys in a row must
+  not fail a healthy job.
+- *The reaper* (`reaper.go`), a goroutine in every worker, safe in several at once because each
+  write is guarded:
+  - **stuck** — `processing` for longer than `JOB_STUCK_AFTER` means the worker died: → `retryable`,
+    or `failed` with `worker_crash` once attempts ≥ MAX. A crash counts as an attempt, otherwise a
+    file that kills the worker loops forever. The worker refuses to start unless
+    `JOB_STUCK_AFTER ≥ TRANSCODE_TIMEOUT + 2m`, so a healthy job always ends first; an unhealthy one
+    (laptop asleep) can outlive it — that is the zombie, and the M5 fence makes it harmless.
+  - **re-push** — `queued`/`retryable` rows untouched for `REQUEUE_AFTER` are pushed again, oldest
+    first, one row at a time: bump `updated_at` in Postgres, **then** push (skipped if `LPOS` finds
+    it already queued). This one sweep re-enqueues retries (`REQUEUE_AFTER` is the backoff), rescues
+    failed pushes, and rebuilds the whole queue after a flush.
+  - **hygiene** — processing-list entries whose row is not `processing` (a worker that committed
+    and died before its `LREM`) are removed.
+- *Status* (`transcode.Status`): one read-only repeatable-read snapshot, so the pointer, the job and
+  the version list agree. Versions come from `renditions` — what fenced commits wrote — so orphan
+  prefixes of dead attempts never show up.
+
+**The crash, fencing and requeue tests are the milestone** (§12 #30–#37; all run against real
+Postgres, Redis, MinIO and ffmpeg, the concurrent ones 3× under `-race`).
+
+| Scenario | What the test does | What must hold |
+|---|---|---|
+| Crash after uploads / after the master / after the commit | the loop's goroutine dies (`runtime.Goexit`: nothing recorded, like a dead process) at each point, on a clip that is already live | the clip plays its previous version until a commit; a fresh worker + reaper finish the job; one `transcode_completed`; every object of every version that was ever live keeps its ETag |
+| Real `kill -9` | builds `cmd/worker`, SIGKILLs its process group mid-ffmpeg | job left `processing`; a restarted worker's reaper requeues it; published on attempt 2 |
+| Real SIGTERM | `SHUTDOWN_GRACE=0` mid-ffmpeg | exit 0 within 15 s, no ffmpeg left behind, `retryable` with attempts unchanged; a restart finishes it on attempt 1 |
+| Zombie | attempt 1 pauses after writing its master, the reaper calls it stuck, attempt 2 publishes, attempt 1 wakes and commits | its commit matches 0 rows; the clip stays on attempt 2 |
+| Poison pill | the worker crashes on every attempt | after 3 the reaper fails it `worker_crash`; never claimed again |
+| Corrupt input | a 4 KiB random file, driven only by the loop and the reaper | 3 attempts, `failed` / `probe_failed`, error ≤ 8 KiB, clip still playable |
+| Lost push / flushed Redis | a row with no queue entry; both lists deleted mid-run | every job completes, once |
+| Duplicate delivery | the same id pushed twice, two workers | one claim, one commit |
+| Two triggers at once | two concurrent `POST /transcode` | one 202, one 409 |
+
+**Bugs the adversarial reviews found, and the tests that now pin them.**
+
+| Bug | Fix |
+|---|---|
+| The re-push sweep reset the clock of *every* eligible row in one `UPDATE`, then pushed them one by one: a pass cut short (sweep deadline, Redis error) left the rest reset but unpushed, and an arbitrary order could starve them | Oldest first, one row at a time: bump, then push. A row the pass never reached keeps its old clock and is first next time. Tested with a Redis hook that cancels the pass after two pushes |
+| The queue slice alone acknowledged retryable jobs with nothing to re-push them | Built and shipped together with the reaper; the recovery tests use no manual pushes |
+
+Found by a test, accepted: the reaper's first sweep can re-push a row in the instant after a worker
+took it but before it claimed it. The duplicate is dropped by whichever worker loses the claim.
+
+**Run it locally.**
+
+```bash
+make up && make fixtures
+make api                    # AUTH_MODE=dev
+make worker                 # the loop + reaper; Ctrl-C = graceful (SHUTDOWN_GRACE)
+curl -b jar -X POST localhost:8080/api/v1/admin/clips/<clip>/transcode   # 202 {job_id}
+curl -b jar localhost:8080/api/v1/admin/clips/<clip>/status              # queued → processing → done
+make worker JOB=<job_id>    # still there: one job, no Redis
+```
+
+**What I learned.** _(to write in my own words)_
+
+**What I chose not to build — and when that choice would be wrong.**
+
+| Not built | Would be wrong when |
+|---|---|
+| A "not before" time on retries: a duplicate entry still in the queue lets a failed job retry before `REQUEUE_AFTER` | the backoff protects something real (a rate-limited upstream, a struggling disk) |
+| One processing list per worker: all workers share `transcode:processing` | many workers with heavy churn, where hygiene's full scan and its BLMOVE-before-claim edge cost something |
+| Putting back a job taken after SIGTERM: it waits for the next re-push | `REQUEUE_AFTER` is long and deploys are frequent |
+| Alerts or metrics on `worker_crash` / `failed` jobs: only the audit log records them | jobs run unattended (M7's batch) and nobody reads the audit log |
+| A queue namespace setting: tests that spawn the real worker isolate it in Redis database 15 | two environments share one Redis |
+| Concurrency inside one worker: one job at a time per process | the catalogue is large enough that one CPU-bound worker cannot keep up — run more processes first |
+| Kafka, or any broker with replay | several independent consumers or sustained high throughput (ARCHITECTURE.md) |
