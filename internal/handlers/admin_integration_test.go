@@ -272,10 +272,14 @@ func TestAdminRoutesHiddenFromNonAdmins(t *testing.T) {
 	if _, err := e.s.Pool.Exec(context.Background(), `UPDATE users SET is_admin = false WHERE id = $1`, e.s.DevUserID); err != nil {
 		t.Fatal(err)
 	}
+	status := "/api/v1/admin/clips/" + clip + "/status"
 	for _, r := range routes {
 		if rec, body := e.postJSON(t, r.path, r.body); rec.Code != 404 || errType(body) != "not_found" {
 			t.Errorf("non-admin %s: %d %v", r.path, rec.Code, body)
 		}
+	}
+	if rec, body := e.get(t, status, true); rec.Code != 404 || errType(body) != "not_found" {
+		t.Errorf("non-admin status: %d %v", rec.Code, body)
 	}
 	var jobs int
 	e.s.Pool.QueryRow(context.Background(), `SELECT count(*) FROM transcode_jobs`).Scan(&jobs)
@@ -292,6 +296,86 @@ func TestAdminRoutesHiddenFromNonAdmins(t *testing.T) {
 	for _, r := range routes {
 		if rec, body := prod.postJSON(t, r.path, r.body); rec.Code != 404 || errType(body) != "not_found" {
 			t.Errorf("prod %s: %d %v", r.path, rec.Code, body)
+		}
+	}
+	if rec, body := prod.get(t, status, true); rec.Code != 404 || errType(body) != "not_found" {
+		t.Errorf("prod status: %d %v", rec.Code, body)
+	}
+}
+
+// GET /admin/clips/{id}/status: the pointer, the newest job, committed versions newest first.
+func TestClipStatus(t *testing.T) {
+	ctx := context.Background()
+	e := setupAPI(t)
+	status := func(clip string) (int, map[string]any) {
+		rec, body := e.get(t, "/api/v1/admin/clips/"+clip+"/status", true)
+		return rec.Code, body
+	}
+
+	// A plain mp4 clip: no job, no versions — [] not null.
+	plain := e.seedClip(t, "plain", time.Now(), []byte("x"))
+	code, body := status(plain)
+	d := data(body)
+	if code != 200 || d["source_type"] != "mp4" || d["hls_version"] != nil || d["latest_job"] != nil {
+		t.Fatalf("plain clip: %d %v", code, body)
+	}
+	if v, ok := d["versions"].([]any); !ok || len(v) != 0 {
+		t.Fatalf("plain clip versions = %#v, want []", d["versions"])
+	}
+
+	// Two committed versions (v2 with two rungs, live), an older done job, a newer failed one.
+	clip := e.seedClip(t, "c", time.Now(), []byte("x"))
+	v1, v2 := e.version(t, clip), uuid.NewString()
+	if _, err := e.s.Pool.Exec(ctx, `UPDATE renditions SET created_at = now() - interval '1 hour' WHERE hls_version = $1`, v1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.s.Pool.Exec(ctx, `
+		INSERT INTO renditions (clip_id, hls_version, height, width, video_bitrate, max_rate, audio_bitrate, bandwidth, segment_count)
+		VALUES ($1, $2, 360, 640, 600000, 642000, 96000, 774900, 15), ($1, $2, 720, 1280, 2400000, 2568000, 128000, 2965600, 15)`,
+		clip, v2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.s.Pool.Exec(ctx, `UPDATE clips SET source_type = 'hls', hls_version = $2 WHERE id = $1`, clip, v2); err != nil {
+		t.Fatal(err)
+	}
+	var failedJob string
+	if err := e.s.Pool.QueryRow(ctx, `
+		WITH old AS (INSERT INTO transcode_jobs (clip_id, status, created_at) VALUES ($1, 'done', now() - interval '1 hour'))
+		INSERT INTO transcode_jobs (clip_id, status, attempts, failure_reason) VALUES ($1, 'failed', 3, 'probe_failed')
+		RETURNING id::text`, clip).Scan(&failedJob); err != nil {
+		t.Fatal(err)
+	}
+
+	code, body = status(clip)
+	d = data(body)
+	if code != 200 || d["source_type"] != "hls" || d["hls_version"] != v2 {
+		t.Fatalf("status: %d %v", code, body)
+	}
+	j, _ := d["latest_job"].(map[string]any)
+	if j["id"] != failedJob || j["status"] != "failed" || j["attempts"] != 3.0 || j["failure_reason"] != "probe_failed" || j["updated_at"] == nil {
+		t.Fatalf("latest_job = %v, want the failed job %s", j, failedJob)
+	}
+	vs, _ := d["versions"].([]any)
+	if len(vs) != 2 {
+		t.Fatalf("versions = %v, want 2", vs)
+	}
+	first, second := vs[0].(map[string]any), vs[1].(map[string]any)
+	if first["hls_version"] != v2 || second["hls_version"] != v1 || first["created_at"] == nil {
+		t.Fatalf("versions order %v, %v; want v2 then v1", first["hls_version"], second["hls_version"])
+	}
+	rs := first["renditions"].([]any)
+	top := rs[0].(map[string]any)
+	if len(rs) != 2 || top["height"] != 720.0 || top["width"] != 1280.0 || top["video_bitrate"] != 2400000.0 ||
+		top["bandwidth"] != 2965600.0 || top["segment_count"] != 15.0 || rs[1].(map[string]any)["height"] != 360.0 {
+		t.Fatalf("v2 renditions = %v, want 720p then 360p with all five fields", rs)
+	}
+	if n := len(second["renditions"].([]any)); n != 1 {
+		t.Fatalf("v1 has %d renditions, want 1", n)
+	}
+
+	for _, id := range []string{uuid.NewString(), "not-a-uuid"} {
+		if code, body := status(id); code != 404 || errType(body) != "not_found" {
+			t.Errorf("status %s: %d %v", id, code, body)
 		}
 	}
 }

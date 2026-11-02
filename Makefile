@@ -23,8 +23,9 @@ migrate: ## apply pending migrations (the API also does this at startup)
 test:
 	go test ./...
 
+# -timeout: the transcode package alone runs ~7.5 min on an M1 and over 10 (go's default) on CI
 test-integration: ## needs `make up`. -p 1: packages share goalstream_test and the test bucket, so they must not run in parallel
-	go test -tags integration -race -count=1 -p 1 ./...
+	go test -tags integration -race -count=1 -p 1 -timeout 20m ./...
 
 .PHONY: fixtures
 fixtures: ## generate synthetic test media into testdata/ (never real footage)

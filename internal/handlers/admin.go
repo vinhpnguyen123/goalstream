@@ -75,3 +75,21 @@ func (s *Server) setDelivery(w http.ResponseWriter, r *http.Request) {
 		httpx.Internal(w, r, err)
 	}
 }
+
+// clipStatus is GET /admin/clips/{id}/status (docs/API.md).
+func (s *Server) clipStatus(w http.ResponseWriter, r *http.Request) {
+	clip := chi.URLParam(r, "id")
+	if uuid.Validate(clip) != nil {
+		httpx.Error(w, r, http.StatusNotFound, "not_found", "clip not found")
+		return
+	}
+	st, err := transcode.Status(r.Context(), s.Pool, clip)
+	switch {
+	case err == nil:
+		httpx.JSON(w, r, http.StatusOK, st)
+	case errors.Is(err, transcode.ErrClipNotFound):
+		httpx.Error(w, r, http.StatusNotFound, "not_found", "clip not found")
+	default:
+		httpx.Internal(w, r, err)
+	}
+}
