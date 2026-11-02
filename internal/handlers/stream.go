@@ -26,7 +26,7 @@ func (s *Server) streamClip(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, http.StatusNotFound, "not_found", "clip not found")
 		return
 	}
-	prefix, _, err := db.ClipPlayback(r.Context(), s.Pool, id)
+	pb, err := db.ClipPlayback(r.Context(), s.Pool, id)
 	if errors.Is(err, db.ErrNotFound) {
 		httpx.Error(w, r, http.StatusNotFound, "not_found", "clip not found")
 		return
@@ -34,7 +34,7 @@ func (s *Server) streamClip(w http.ResponseWriter, r *http.Request) {
 		httpx.Internal(w, r, err)
 		return
 	}
-	key := prefix + "original.mp4"
+	key := pb.Prefix + "original.mp4"
 	// A row whose object is missing is an inconsistency, not an absent clip: Internal logs it.
 	size, err := s.Store.Size(r.Context(), key)
 	if err != nil {

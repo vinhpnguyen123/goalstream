@@ -12,6 +12,32 @@ OUT="testdata/matches/test_league/2015-2016"
 FORCE="${1:-}"
 [[ "$FORCE" == "--force" ]] && rm -rf testdata
 
+# Clips for the transcode tests (IMPLEMENTATION_PLAN §12 #3), shaped like an ingest mezzanine:
+# MP4, keyframe every 2 s, AAC stereo 48 kHz. testsrc2 compresses to almost nothing, so "CBR"
+# means -b:v = -minrate = -maxrate = -bufsize with nal-hrd=cbr (filler data). Tests still read
+# the MEASURED bitrate, never these nominal ones. Each is generated only if missing.
+# clip <file> <WxH> <video bps> <audio:yes|no>
+clip() {
+  local file="testdata/$1" size="$2" bps="$3" audio="$4"
+  [[ -f "$file" ]] && return
+  local -a in=(-f lavfi -i "testsrc2=size=$size:rate=25") map=(-map 0:v) a=()
+  if [[ "$audio" == yes ]]; then
+    in+=(-f lavfi -i "sine=frequency=440:sample_rate=48000")
+    map+=(-map 1:a)
+    a=(-c:a aac -b:a 128k -ac 2 -ar 48000)
+  fi
+  ffmpeg -nostdin -v error -y "${in[@]}" "${map[@]}" -t 60 \
+    -c:v libx264 -preset veryfast -b:v "$bps" -minrate "$bps" -maxrate "$bps" -bufsize "$bps" \
+    -x264-params nal-hrd=cbr -pix_fmt yuv420p -force_key_frames "expr:gte(t,n_forced*2)" \
+    ${a[@]+"${a[@]}"} -movflags +faststart "$file" # bash 3.2 (macOS): an empty array trips set -u
+}
+mkdir -p testdata
+clip clip_1080p.mp4 1920x1080 5000000 yes   # → 4 rungs
+clip clip_720p_low.mp4 1280x720 1500000 yes # → 3 rungs
+clip clip_576p.mp4 1024x576 1500000 yes     # → 2 rungs, starts at 480p (§10 example D)
+clip clip_noaudio.mp4 640x360 800000 no     # → terminal no_audio_stream
+[[ -f testdata/clip_corrupt.mp4 ]] || head -c 4096 /dev/urandom > testdata/clip_corrupt.mp4 # → probe fails
+
 if [[ -f "$OUT/.complete" ]]; then
   echo "fixtures already present (use --force to regenerate)"
   exit 0

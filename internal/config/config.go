@@ -22,6 +22,15 @@ type Config struct {
 	Ingest      IngestConfig
 	API         APIConfig
 	Reco        RecoConfig
+	Worker      WorkerConfig
+}
+
+// WorkerConfig is read by cmd/worker only. The queue, reaper and shutdown settings arrive in M6.
+type WorkerConfig struct {
+	WorkDir           string        // per-attempt temp dirs go here; "" = the OS temp dir
+	TranscodeTimeout  time.Duration // one attempt, download → commit
+	MaxAttempts       int           // compared with >=, never =
+	UploadConcurrency int
 }
 
 // RecoConfig tunes selection (plan §11). Read by the API only.
@@ -124,6 +133,15 @@ func Load(getenv func(string) string) (Config, error) {
 			TopK:               p.integer("RECO_TOP_K", 50),
 			NegPenalty:         p.float("NEG_PENALTY", 0.5),
 		},
+		Worker: WorkerConfig{
+			WorkDir:           p.str("WORK_DIR", ""),
+			TranscodeTimeout:  p.duration("TRANSCODE_TIMEOUT", 10*time.Minute),
+			MaxAttempts:       p.integer("MAX_TRANSCODE_ATTEMPTS", 3),
+			UploadConcurrency: p.integer("UPLOAD_CONCURRENCY", 4),
+		},
+	}
+	if w := c.Worker; w.TranscodeTimeout <= 0 || w.MaxAttempts < 1 || w.UploadConcurrency < 1 {
+		p.errs = append(p.errs, errors.New("TRANSCODE_TIMEOUT must be > 0, MAX_TRANSCODE_ATTEMPTS and UPLOAD_CONCURRENCY ≥ 1"))
 	}
 	if r := c.Reco; r.ExploreRate < 0 || r.ExploreRate > 1 || r.ColdStartThreshold < 0 ||
 		r.TopK < 1 || r.TopK > 1000 || r.NegPenalty < 0 {

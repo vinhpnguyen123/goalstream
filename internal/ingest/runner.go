@@ -285,7 +285,7 @@ func (r *Runner) publish(ctx context.Context, m matchCtx, a Annotation, h, pos i
 
 	id := uuid.NewString()
 	prefix := "clips/" + id + "/"
-	if err := r.Store.PutFile(ctx, prefix+"original.mp4", file, "video/mp4"); err != nil {
+	if err := r.Store.PutFile(ctx, prefix+"original.mp4", file, "video/mp4", ""); err != nil {
 		return err // storage down: abort the run rather than reject a good clip
 	}
 

@@ -98,7 +98,7 @@ func (e apiEnv) seedClip(t *testing.T, title string, createdAt time.Time, body [
 	if err := os.WriteFile(f, body, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.s.Store.PutFile(ctx, "clips/"+id+"/original.mp4", f, "video/mp4"); err != nil {
+	if err := e.s.Store.PutFile(ctx, "clips/"+id+"/original.mp4", f, "video/mp4", ""); err != nil {
 		t.Fatal(err)
 	}
 	vec, _ := recommend.Embed(recommend.Features{CompSlot: 0, SeasonSlot: 0})

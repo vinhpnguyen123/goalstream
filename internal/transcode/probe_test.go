@@ -22,7 +22,7 @@ func TestParseProbe(t *testing.T) {
 			`{"streams":[{"codec_type":"video","width":1280,"height":720,"bit_rate":"4509448"},
 			             {"codec_type":"audio","bit_rate":"128498"}],
 			  "format":{"duration":"60.000000","bit_rate":"4644149"}}`,
-			Probe{HasVideo: true, HasAudio: true, Width: 1280, Height: 720, VideoBps: 4509448, FormatBps: 4644149, DurationMS: 60000},
+			Probe{HasVideo: true, HasAudio: true, Width: 1280, Height: 720, VideoBps: 4509448, AudioBps: 128498, FormatBps: 4644149, DurationMS: 60000},
 		},
 		{
 			"no audio",

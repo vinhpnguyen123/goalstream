@@ -34,10 +34,16 @@ func JSON(w http.ResponseWriter, r *http.Request, status int, data any) {
 // Error writes {"error": {type, message}, "request_id": …}. typ must be one of the closed set
 // in docs/API.md; msg is shown to users, so it never carries internals.
 func Error(w http.ResponseWriter, r *http.Request, status int, typ, msg string) {
-	write(w, status, map[string]any{
-		"error":      map[string]string{"type": typ, "message": msg},
-		"request_id": RequestID(r.Context()),
-	})
+	ErrorWith(w, r, status, typ, msg, nil)
+}
+
+// ErrorWith is Error plus fields inside "error" — job_active carries the active job_id.
+func ErrorWith(w http.ResponseWriter, r *http.Request, status int, typ, msg string, extra map[string]string) {
+	e := map[string]string{"type": typ, "message": msg}
+	for k, v := range extra {
+		e[k] = v
+	}
+	write(w, status, map[string]any{"error": e, "request_id": RequestID(r.Context())})
 }
 
 // Internal logs err with the request ID and answers 500 without details.

@@ -68,6 +68,7 @@ func TestRulesMatchAPIDoc(t *testing.T) {
 		closed bool
 	}{
 		{RuleDefault, 300, false}, {RuleGate, 10, true}, {RuleGateGlobal, 100, true}, {RulePlay, 60, false},
+		{RuleAdmin, 30, false},
 	} {
 		if tc.r.Limit != tc.limit || tc.r.FailClosed != tc.closed || tc.r.Window != time.Minute {
 			t.Errorf("rule %s = %+v", tc.r.Name, tc.r)

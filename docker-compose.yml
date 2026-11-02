@@ -48,7 +48,9 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
       S3_BUCKET: ${S3_BUCKET:?set in .env}
       S3_TEST_BUCKET: ${S3_TEST_BUCKET:?set in .env}
-    volumes: ["./deploy/local/minio-init.sh:/minio-init.sh:ro"]
+    volumes:
+      - ./deploy/local/minio-init.sh:/minio-init.sh:ro
+      - ./deploy/local/hls-read-policy.json:/hls-read-policy.json:ro
     entrypoint: ["/bin/sh", "/minio-init.sh"]
 
 volumes:
