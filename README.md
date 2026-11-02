@@ -327,3 +327,114 @@ check so far is a phone-sized viewport in DevTools (M2).
 | A CDN or custom domain in front of R2: presigned URLs hit R2 directly | viewers are far from R2's region, or the same clips are watched often enough to cache |
 | Hand-verified shot-type tags | recommendations are judged on tag quality, or tags are shown to users |
 | An always-on API instance: the free one sleeps | the cold start (up to a minute) is felt by someone other than me |
+
+### M5 — HLS for one clip (`m5-hls-one-clip`)
+
+**What it does.** A clip can now be delivered as adaptive HLS — 720p / 480p / 360p, 4-second
+segments — instead of one MP4, **per clip and reversibly**, on the running app: every other clip
+keeps playing as MP4, and an admin rollback puts any clip back on its original instantly. Local
+only: Phase B is never deployed (production stays MP4; see M4.5 for why).
+
+**How it works.**
+
+- *The ladder* (`internal/transcode/ladder.go`) is derived, never fixed: never above the source's
+  measured video bitrate, never above the source height, capped per height (5.0 / 3.0 / 1.4 /
+  0.7 Mbps — our "source" is a CRF mezzanine whose own bitrate is an inflated cap), halving per
+  rung, stopping below 300 kbps. On the real catalogue: a 2.5 Mbps 720p clip →
+  720p@2524k / 480p@1262k / 360p@631k; four clips above 3 Mbps hit the 720p ceiling.
+- *Encoding* (`hls.go`): keyframes forced every 2 s **by time** (not `-g 48`, which is 1.92 s at
+  25 fps), so segment N starts at the same instant in every rung and the player can switch
+  mid-stream cleanly — tested by comparing each segment's first PTS across rungs. `-maxrate` and
+  `-bufsize` bound the peak, so the master's `BANDWIDTH` is a true upper bound.
+- *One prefix per attempt* (`job.go`): every claim mints a fresh `output_version`, which is both
+  the attempt's private prefix `hls/<version>/` and its fencing token. `master.m3u8` is uploaded
+  **last**: no master, no version. A crashed attempt leaves an orphan nobody points at.
+- *The fenced commit* is the only way a version goes live: one transaction that first moves the
+  job to `done` **guarded by this attempt's `output_version`**, then records renditions and
+  points `clips.hls_version` at the version. A reaped, cancelled or superseded attempt matches
+  0 rows and publishes nothing. The test that proves it makes the zombie commit *while* the next
+  attempt is still processing — with only the status in the guard, that test fails.
+- *Rollback* (`POST /admin/clips/{id}/delivery`, `admin.go`): one transaction that cancels the
+  clip's active job (whose commit is then fenced out — rollback always wins) and flips the clip
+  to mp4 or to an older committed version. Rolling back to mp4 keeps `hls_version`, so the version
+  just left can be re-promoted. Admin routes exist only outside production.
+- *Delivery*: `/play` presigns only `master.m3u8`; the player resolves renditions and segments
+  relative to it, unsigned. Locally, a MinIO policy allows anonymous reads of `clips/*/hls/*` and
+  nothing else (originals stay presigned-only, MinIO binds 127.0.0.1) — tested, and never applied
+  to R2. `?format=mp4` always returns the original: the player's structural fallback.
+- *Player*: hls.js is loaded only when an hls URL arrives (production never downloads its 575 kB);
+  it starts at the rung the measured bandwidth allows. Any fatal HLS error — or the hls.js chunk
+  failing to download — falls back to MP4 once, then skips. Safari on macOS has MSE, so it also
+  uses hls.js; the browser's native HLS path runs only where MSE is missing (iOS < 17.1) and is
+  covered by unit tests only — an iPhone cannot reach a 127.0.0.1 MinIO.
+
+**Bugs the adversarial reviews found, and the tests that now pin them.**
+
+| Bug | Fix |
+|---|---|
+| The commit ran outside the attempt timeout, and a failed commit skipped the failure handler: the job stayed `processing` forever (no reaper until M6) | The commit runs under the same deadline; any commit error goes through the fenced failure handler (`shutdown`, `timeout` or `commit_failed`). Tested with a SIGTERM right after the master upload and with a commit stuck behind a row lock |
+| A job being created while a rollback ran was invisible to it, committed afterwards and later undid the rollback | Both take a per-clip advisory lock first. Tested deterministically with an uncommitted insert held open |
+| A shutdown at the attempt limit failed the job, although shutdowns must not burn attempts | The limit check skips `shutdown` |
+| A failed hls.js download left the player with nothing attached — no error, no fallback | A failed import means "no hls.js": native HLS, or an error that falls back to MP4 |
+
+**Run it locally.**
+
+```bash
+make up && make fixtures
+make api   # AUTH_MODE=dev                       # then, with the gate cookie:
+curl -b jar -X POST localhost:8080/api/v1/admin/clips/<clip>/transcode          # 202 {job_id}
+make worker JOB=<job_id>                                                          # ~30 s per clip
+curl -b jar -X POST localhost:8080/api/v1/admin/clips/<clip>/delivery -d '{"source_type":"mp4"}'
+```
+
+**Measured: MP4 vs HLS on the same 10 clips** — local stack, Chrome DevTools "Slow 4G" with cache
+disabled (measured link 1.1–1.3 Mbps), each clip played to 0:30 (at most 75 s), `scripts/ttff.js`
+(it also records which rung every segment came from), 2026-11-01.
+
+| | MP4 | HLS, starting at 720p | HLS, starting at the measured rung |
+|---|---|---|---|
+| TTFF p50 / max | **3.1 s** / 4.1 s | 9.6 s / 11.5 s | 7.1 s / 7.7 s |
+| Stalls | 76 — every clip, 7–8 each | **0** | **0** |
+| Time frozen | 409 s (~41 s per clip) | 0 | 0 |
+| Rungs played | one 2.2–3.0 Mbps file | 720p×1 → 360p for the rest | 360p (2 clips tried 480p once, came back) |
+| Waiting per clip (first frame + frozen) | **~44 s** | ~10 s | **~7 s** |
+
+> **The M4.5 success criterion, honestly:** stalls went from 76 to **zero** — met. "The first
+> frame should arrive sooner" — **not met**: HLS starts ~2× later than MP4. Starting at the first
+> rung in the master (720p) meant downloading a whole 1.5 MB segment before the first frame;
+> starting at the measured rung brought p50 from 9.6 s to 7.1 s, but HLS still needs four
+> sequential requests (`/play`, master, media playlist, first segment — each paying Slow 4G's
+> latency) and a whole 4-second segment before it shows a frame, where a faststart MP4 shows one
+> after a few hundred KB. The trade is a later start for continuous playback: ~7 s of waiting per
+> clip instead of ~44 s.
+
+**How the player picks a rung** (hls.js 1.7.3 defaults): it measures throughput on every segment
+and takes the highest rung whose peak `BANDWIDTH` fits 95 % of it (70 % to climb, so it does not
+bounce; with ≥ 2 segments buffered it compares the average bitrate instead). On this catalogue:
+
+| Rung | Peak `BANDWIDTH` | Link needed to hold it | Link needed to climb to it |
+|---|---|---|---|
+| 360p | 0.73 – 0.89 Mbps | ~0.8 – 0.95 Mbps | (start rung) |
+| 480p | 1.36 – 1.67 Mbps | ~1.45 – 1.75 Mbps | ~1.95 – 2.4 Mbps |
+| 720p | 2.66 – 3.50 Mbps | ~2.8 – 3.7 Mbps | ~3.8 – 5.0 Mbps |
+
+At ~1.2 Mbps that is 360p; the two clips with the lightest 480p (average 1.22 Mbps, right at the
+budget) tried it for one segment and dropped back. Below ~0.8 Mbps even 360p does not fit.
+
+§12 #29 (adaptive switching): switching **down** is shown above on every clip (720p → 360p) and
+both ways on two clips (360p → 480p → 360p). Switching back **up** when the link recovers was not
+exercised by hand, and nothing was tested on an iPhone.
+
+**What I learned.** _(to write in my own words)_
+
+**What I chose not to build — and when that choice would be wrong.**
+
+| Not built | Would be wrong when |
+|---|---|
+| A queue, reaper and retries in the background: M5 runs one job by hand (`worker -once`) | it is M6 |
+| Deleting old versions and crashed-attempt orphans: they accumulate, inert | storage cost matters — then a sweep comparing prefixes to `renditions`, never auto-deleting the live one |
+| A rung below 360p | viewers sit on links under ~0.8 Mbps, where even 360p stalls |
+| Shorter segments or hls.js progressive loading to cut HLS's first frame | the first second matters more than the stalls after it (short clips, autoplay feeds) |
+| Testing native HLS (iOS Safari) | iPhones are expected viewers — it needs the stream reachable off-localhost, i.e. M9's access control |
+| Thumbnails in the UI: `/clips` returns `thumbnail_url`, nothing renders it | a clip list or a poster image is built |
+| Deploying any of it | real viewers need adaptive streaming in production (M4.5) |
