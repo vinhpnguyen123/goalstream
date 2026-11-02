@@ -53,7 +53,11 @@ export default function Player(props: Props) {
     if (HlsJS && chooseEngine(p.type, HlsJS.isSupported(), v.canPlayType(HLS_MIME) !== '') === 'hlsjs') {
       // Only the master is presigned; hls.js fetches renditions and segments relative to it,
       // unsigned (the local hls/ read policy, plan §8). Quality switching happens here, in JS.
-      const h = new HlsJS()
+      // startLevel -1: start from the rung the measured bandwidth allows (hls.js loads the lowest
+      // rung's first segment to measure), not the first rung in the master (720p). Measured
+      // 2026-11-01 on Slow 4G: starting at 720p cost a whole 1.5 MB segment before the first
+      // frame — TTFF p50 9.6 s vs 3.1 s for MP4.
+      const h = new HlsJS({ startLevel: -1 })
       hls.current = h
       h.on(HlsJS.Events.ERROR, (_event, data) => {
         if (data.fatal && h === hls.current) onError.current()
