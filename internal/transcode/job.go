@@ -21,8 +21,8 @@ import (
 	"github.com/vinhpnguyen123/goalstream/internal/storage"
 )
 
-// Failure reasons a worker writes (IMPLEMENTATION_PLAN §6). worker_crash belongs to the M6
-// reaper and manual to the admin rollback.
+// Failure reasons a worker writes (IMPLEMENTATION_PLAN §6). worker_crash belongs to the reaper
+// and manual to the admin rollback.
 const (
 	ReasonDownloadFailed  = "download_failed"
 	ReasonProbeFailed     = "probe_failed"
@@ -84,7 +84,7 @@ type Result struct {
 }
 
 // Claim takes a queued or retryable job: attempts+1 (a crash counts as an attempt), a fresh
-// output_version, and the started_at clock the M6 reaper reads. The guard is the claim:
+// output_version, and the started_at clock the reaper reads. The guard is the claim:
 // whoever matches the row owns the attempt; everyone else gets ErrNotClaimable.
 func Claim(ctx context.Context, pool *pgxpool.Pool, jobID string) (Attempt, error) {
 	a := Attempt{JobID: jobID}
@@ -116,6 +116,15 @@ type Worker struct {
 	Log   *slog.Logger
 	// put uploads one object; nil means Store.PutFile. A test seam that records upload order.
 	put func(ctx context.Context, key, path, contentType, cacheControl string) error
+	// hook is a test seam (§12 #31, #32), called at named steps of an attempt: "uploaded"
+	// (everything but the master) and "mastered" (master written, commit next). nil in production.
+	hook func(step string)
+}
+
+func (w *Worker) at(step string) {
+	if w.hook != nil {
+		w.hook(step)
+	}
 }
 
 // Process runs one job end to end: claim → attempt → fenced commit, or the failure handler.
@@ -123,7 +132,7 @@ type Worker struct {
 // cannot hold the job forever. nil means the clip now plays the new version. ErrNotClaimable
 // and ErrSuperseded mean another owner decides the job. A *Failure has been recorded on the
 // row; any other error means recording it failed too (Postgres unreachable) and the job stays
-// processing until the M6 reaper.
+// processing until the reaper calls it stuck.
 func (w *Worker) Process(ctx context.Context, jobID string) error {
 	a, err := Claim(ctx, w.Pool, jobID)
 	if err != nil {
@@ -244,6 +253,7 @@ func (w *Worker) run(ctx context.Context, a Attempt) (Result, error) {
 	if err := w.uploadTree(ctx, out, base); err != nil {
 		return Result{}, retryable(ReasonUploadFailed, err)
 	}
+	w.at("uploaded")
 
 	// 10. master.m3u8 LAST, only after everything it points at exists (L1): no master, no version.
 	master := filepath.Join(dir, "master.m3u8")
@@ -253,6 +263,7 @@ func (w *Worker) run(ctx context.Context, a Attempt) (Result, error) {
 	if err := w.putFile(ctx, base+"master.m3u8", master, contentType(master), immutable); err != nil {
 		return Result{}, retryable(ReasonUploadFailed, err)
 	}
+	w.at("mastered")
 	res.ThumbKey = base + "thumb.jpg"
 	return res, nil
 }
@@ -394,7 +405,7 @@ func Commit(ctx context.Context, pool *pgxpool.Pool, a Attempt, res Result) erro
 
 // Fail is the failure handler: one guarded statement, fenced like the commit, on a fresh
 // context so a cancelled attempt can still record why it ended. The job goes to failed when the
-// reason is terminal or attempts ≥ max, else retryable (the M6 reaper re-pushes it).
+// reason is terminal or attempts ≥ max, else retryable (the reaper re-pushes it).
 //
 // Shutdown does not burn an attempt — a deploy that restarts the worker three times must not
 // kill a healthy job — so it never fails on the attempt limit and gives its attempt back.

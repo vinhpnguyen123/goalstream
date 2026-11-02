@@ -26,8 +26,8 @@ func (e *ActiveJobError) Error() string { return "job " + e.JobID + " is already
 
 // CreateJob queues a transcode of the clip — also when it is already hls: that is a
 // re-transcode and produces a new version. The partial unique index jobs_one_active_per_clip is
-// the guard: two active jobs would race the hls_version pointer. M5 does not push to Redis; the
-// job is run by hand (worker -once). M6 pushes after this row exists — Postgres first.
+// the guard: two active jobs would race the hls_version pointer. It does not push: the caller
+// pushes after this returns, so the row exists first (Postgres before Redis).
 func CreateJob(ctx context.Context, pool *pgxpool.Pool, clipID string) (string, error) {
 	var jobID string
 	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {

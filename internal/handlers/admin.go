@@ -11,8 +11,9 @@ import (
 	"github.com/vinhpnguyen123/goalstream/internal/transcode"
 )
 
-// createJob is POST /admin/clips/{id}/transcode → 202 {job_id}. The worker runs it
-// (M5: by hand, `make worker JOB=…`; M6: from the queue).
+// createJob is POST /admin/clips/{id}/transcode → 202 {job_id}: the row first, then the push.
+// A failed push is still a 202 — the row is the job, and the reaper pushes it after
+// REQUEUE_AFTER.
 func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	clip := chi.URLParam(r, "id")
 	if uuid.Validate(clip) != nil {
@@ -23,6 +24,9 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	var active *transcode.ActiveJobError
 	switch {
 	case err == nil:
+		if perr := s.Queue.Push(r.Context(), job); perr != nil {
+			httpx.Log(r.Context()).Warn("queue push failed; the reaper will push the job", "job", job, "err", perr)
+		}
 		httpx.JSON(w, r, http.StatusAccepted, map[string]string{"job_id": job})
 	case errors.Is(err, transcode.ErrClipNotFound):
 		httpx.Error(w, r, http.StatusNotFound, "not_found", "clip not found")

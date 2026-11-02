@@ -14,11 +14,13 @@ import (
 	"github.com/vinhpnguyen123/goalstream/internal/middleware"
 	"github.com/vinhpnguyen123/goalstream/internal/recommend"
 	"github.com/vinhpnguyen123/goalstream/internal/storage"
+	"github.com/vinhpnguyen123/goalstream/internal/transcode"
 )
 
 type Server struct {
 	Pool  *pgxpool.Pool
-	Redis *redis.Client // rate limiter only in M1; it holds no truth
+	Redis *redis.Client // rate limiter, and the transcode queue through Queue; it holds no truth
+	Queue transcode.Queue
 	Store *storage.Client
 	Cfg   config.Config
 	// DevUserID is the AUTH_MODE=dev user, upserted at startup. Empty in any other mode.

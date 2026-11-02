@@ -55,7 +55,9 @@ func setupJobs(t *testing.T) *jobEnv {
 	e := &jobEnv{pool: pool, cfg: cfg}
 	store := storage.New(cfg.S3)
 	e.w = &Worker{Pool: pool, Store: store, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Cfg: config.WorkerConfig{WorkDir: t.TempDir(), TranscodeTimeout: 5 * time.Minute, MaxAttempts: 3, UploadConcurrency: 4}}
+		Cfg: config.WorkerConfig{WorkDir: t.TempDir(), TranscodeTimeout: 5 * time.Minute, MaxAttempts: 3, UploadConcurrency: 4,
+			// Reaper clocks for tests: re-push fast; "stuck" only when a test backdates started_at.
+			JobStuckAfter: time.Hour, RequeueAfter: time.Second, ReaperInterval: 200 * time.Millisecond}}
 	e.w.put = func(ctx context.Context, key, path, ct, cc string) error {
 		if err := store.PutFile(ctx, key, path, ct, cc); err != nil {
 			return err
@@ -295,7 +297,7 @@ func TestRetranscodeNewPrefix(t *testing.T) {
 }
 
 // The zombie, without timing: attempt 1 finishes its uploads after the job was re-claimed
-// (what the M6 reaper does to a stuck job). Attempt 2 commits; attempt 1's commit matches
+// (what the reaper does to a stuck job). Attempt 2 commits; attempt 1's commit matches
 // 0 rows and publishes nothing — and a cancelled job fences out the same way.
 func TestCommitIsFenced(t *testing.T) {
 	ctx := context.Background()

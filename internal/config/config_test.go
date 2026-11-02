@@ -168,3 +168,28 @@ func TestLabelsTrimmed(t *testing.T) {
 		t.Fatalf("labels: %q", c.Ingest.Labels)
 	}
 }
+
+func TestValidateWorker(t *testing.T) {
+	for _, tc := range []struct {
+		name, timeout, stuck string
+		ok                   bool
+	}{
+		{"defaults", "", "", true},
+		{"exactly timeout + 2m", "10m", "12m", true},
+		{"one second short", "10m", "11m59s", false},
+		{"stuck below timeout", "10m", "5m", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := Load(env(map[string]string{"TRANSCODE_TIMEOUT": tc.timeout, "JOB_STUCK_AFTER": tc.stuck}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := c.ValidateWorker(); (err == nil) != tc.ok {
+				t.Fatalf("ValidateWorker() = %v, want ok=%v", err, tc.ok)
+			}
+		})
+	}
+	if _, err := Load(env(map[string]string{"REQUEUE_AFTER": "0s"})); err == nil {
+		t.Fatal("REQUEUE_AFTER=0 accepted")
+	}
+}

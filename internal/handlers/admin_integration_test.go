@@ -5,12 +5,15 @@ package handlers
 import (
 	"context"
 	"errors"
+	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/vinhpnguyen123/goalstream/internal/transcode"
 )
@@ -68,6 +71,10 @@ func TestCreateJob(t *testing.T) {
 		t.Fatalf("transcode: %d %v", rec.Code, body)
 	}
 	job := data(body)["job_id"].(string)
+	// Postgres first, then the push: the queue holds exactly this job.
+	if q, err := e.s.Redis.LRange(context.Background(), e.s.Queue.NS+":queue", 0, -1).Result(); err != nil || len(q) != 1 || q[0] != job {
+		t.Fatalf("queue = %v (%v), want [%s]", q, err, job)
+	}
 
 	rec, body = e.post(t, "/api/v1/admin/clips/"+clip+"/transcode")
 	errObj, _ := body["error"].(map[string]any)
@@ -91,6 +98,57 @@ func TestCreateJob(t *testing.T) {
 	}
 	if rec, body := e.post(t, "/api/v1/admin/clips/"+clip+"/transcode"); rec.Code != 202 {
 		t.Fatalf("transcode after a failed job: %d %v", rec.Code, body)
+	}
+}
+
+// §12 #35: two concurrent triggers for one clip → one 202, one 409, one job row.
+func TestCreateJobConcurrent(t *testing.T) {
+	e := setupAPI(t)
+	for i := 0; i < 10; i++ {
+		clip := e.seedClip(t, "c", time.Now(), []byte("x"))
+		codes := make(chan int, 2)
+		var wg sync.WaitGroup
+		for range 2 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				req := httptest.NewRequest("POST", "/api/v1/admin/clips/"+clip+"/transcode", nil)
+				req.RemoteAddr = "203.0.113.9:1234"
+				req.AddCookie(e.cookie)
+				rec := httptest.NewRecorder()
+				e.h.ServeHTTP(rec, req)
+				codes <- rec.Code
+			}()
+		}
+		wg.Wait()
+		close(codes)
+		got := map[int]int{}
+		for c := range codes {
+			got[c]++
+		}
+		if got[202] != 1 || got[409] != 1 {
+			t.Fatalf("round %d: codes %v, want one 202 and one 409", i, got)
+		}
+		var jobs int
+		e.s.Pool.QueryRow(context.Background(), `SELECT count(*) FROM transcode_jobs WHERE clip_id = $1`, clip).Scan(&jobs)
+		if jobs != 1 {
+			t.Fatalf("round %d: %d job rows", i, jobs)
+		}
+	}
+}
+
+// Redis down: the push fails, the job is still accepted — the row is the job.
+func TestCreateJobRedisDown(t *testing.T) {
+	e := setupAPI(t)
+	clip := e.seedClip(t, "c", time.Now(), []byte("x"))
+	e.s.Queue.R = redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", MaxRetries: -1})
+	if rec, body := e.post(t, "/api/v1/admin/clips/"+clip+"/transcode"); rec.Code != 202 {
+		t.Fatalf("transcode with Redis down: %d %v", rec.Code, body)
+	}
+	var st string
+	e.s.Pool.QueryRow(context.Background(), `SELECT status FROM transcode_jobs WHERE clip_id = $1`, clip).Scan(&st)
+	if st != "queued" {
+		t.Fatalf("job status %q, want queued", st)
 	}
 }
 
