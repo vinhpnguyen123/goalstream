@@ -154,7 +154,9 @@ func SetDelivery(ctx context.Context, pool *pgxpool.Pool, clipID, version string
 // it, because its job row lock already orders it against the cancel. Keys are hashtext, so two
 // clips can share one: they only wait on each other, never see wrong data.
 func lockClipJobs(ctx context.Context, tx pgx.Tx, clipID string) error {
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('clip-jobs:' || $1))`, clipID); err != nil {
+	// $1::uuid::text: one key per clip, however the caller spelled its id — an uppercase and a
+	// lowercase UUID name the same row but would hash to two locks (Codex review, 2026-11-02).
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('clip-jobs:' || $1::uuid::text))`, clipID); err != nil {
 		return fmt.Errorf("locking jobs of clip %s: %w", clipID, err)
 	}
 	return nil

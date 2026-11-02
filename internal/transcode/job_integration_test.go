@@ -641,42 +641,55 @@ func TestRollbackRacesCommit(t *testing.T) {
 // rollback waits for it and cancels it. Without the per-clip lock the cancel cannot see the
 // uncommitted row, the job commits queued, and running it later undoes the rollback.
 func TestRollbackWaitsForAnUncommittedJob(t *testing.T) {
-	ctx := context.Background()
-	e := setupJobs(t)
-	clipID, _ := e.clip(t, "")
+	// The second case spells the same clip two ways: Postgres reads both as one UUID, so the
+	// lock must too — hashing the raw string gave each spelling its own lock.
+	for _, tc := range []struct {
+		name            string
+		create, rollbak func(string) string
+	}{
+		{"same spelling", strings.ToLower, strings.ToLower},
+		{"uppercase create, lowercase rollback", strings.ToUpper, strings.ToLower},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			e := setupJobs(t)
+			clipID, _ := e.clip(t, "")
 
-	tx, err := e.pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tx.Rollback(ctx)
-	if err := lockClipJobs(ctx, tx, clipID); err != nil { // exactly what CreateJob holds
-		t.Fatal(err)
-	}
-	var jobID string
-	if err := tx.QueryRow(ctx, `INSERT INTO transcode_jobs (clip_id) VALUES ($1) RETURNING id::text`, clipID).Scan(&jobID); err != nil {
-		t.Fatal(err)
-	}
+			tx, err := e.pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback(ctx)
+			if err := lockClipJobs(ctx, tx, tc.create(clipID)); err != nil { // exactly what CreateJob holds
+				t.Fatal(err)
+			}
+			var jobID string
+			if err := tx.QueryRow(ctx, `INSERT INTO transcode_jobs (clip_id) VALUES ($1) RETURNING id::text`,
+				tc.create(clipID)).Scan(&jobID); err != nil {
+				t.Fatal(err)
+			}
 
-	done := make(chan error, 1)
-	go func() { _, err := SetDelivery(ctx, e.pool, clipID, ""); done <- err }()
-	select {
-	case err := <-done:
-		t.Fatalf("rollback finished (%v) while a job insert was still uncommitted", err)
-	case <-time.After(300 * time.Millisecond):
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("rollback still blocked after the insert committed")
-	}
-	if j := e.jobRow(t, jobID); j.Status != "failed" || j.Reason != "manual" {
-		t.Fatalf("job = %+v: the rollback missed the job created alongside it", j)
+			done := make(chan error, 1)
+			go func() { _, err := SetDelivery(ctx, e.pool, tc.rollbak(clipID), ""); done <- err }()
+			select {
+			case err := <-done:
+				t.Fatalf("rollback finished (%v) while a job insert was still uncommitted", err)
+			case <-time.After(300 * time.Millisecond):
+			}
+			if err := tx.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("rollback still blocked after the insert committed")
+			}
+			if j := e.jobRow(t, jobID); j.Status != "failed" || j.Reason != "manual" {
+				t.Fatalf("job = %+v: the rollback missed the job created alongside it", j)
+			}
+		})
 	}
 }
