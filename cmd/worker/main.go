@@ -1,9 +1,11 @@
-// Command worker transcodes clips to HLS. In M5 it runs one job and exits:
+// Command worker transcodes clips to HLS. By default it takes jobs from the Redis queue until
+// SIGTERM, with the reaper sweeping alongside; -once runs one job by id and exits (M5, kept for
+// debugging):
 //
+//	worker
 //	worker -once <job_id>
 //
-// The queue loop (BLMOVE), the reaper and graceful shutdown arrive in M6 around the same
-// claim → attempt → fenced commit functions. It applies pending migrations first (D17).
+// It applies pending migrations first (D17).
 package main
 
 import (
@@ -16,6 +18,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/vinhpnguyen123/goalstream/internal/config"
 	"github.com/vinhpnguyen123/goalstream/internal/db"
 	"github.com/vinhpnguyen123/goalstream/internal/storage"
@@ -23,8 +27,9 @@ import (
 )
 
 func main() {
-	// Ctrl-C / SIGTERM cancels the attempt: ffmpeg is killed and the job is recorded as
-	// retryable with reason shutdown, its attempt given back.
+	// Ctrl-C / SIGTERM: no new job is taken; the one in hand gets SHUTDOWN_GRACE (-once: none),
+	// then ffmpeg is killed and the job is recorded retryable with reason shutdown, its attempt
+	// given back.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx, os.Args[1:]); err != nil {
@@ -39,10 +44,13 @@ func run(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *once == "" {
-		return errors.New("usage: worker -once <job_id> (the queue loop arrives in M6)")
+	if fs.NArg() > 0 {
+		return errors.New("usage: worker [-once <job_id>]")
 	}
 	cfg, err := config.Load(os.Getenv)
+	if err == nil {
+		err = cfg.ValidateWorker()
+	}
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
@@ -63,5 +71,21 @@ func run(ctx context.Context, args []string) error {
 	defer pool.Close()
 
 	w := &transcode.Worker{Pool: pool, Store: storage.New(cfg.S3), Cfg: cfg.Worker, Log: log}
-	return w.Process(ctx, *once)
+	if *once != "" {
+		return w.Process(ctx, *once)
+	}
+
+	ropt, err := redis.ParseURL(cfg.RedisURL)
+	if err != nil {
+		return fmt.Errorf("config: REDIS_URL: %w", err)
+	}
+	rdb := redis.NewClient(ropt) // not pinged: the loop backs off while Redis is down
+	defer rdb.Close()
+	log.Info("worker started", "transcode_timeout", cfg.Worker.TranscodeTimeout.String(),
+		"shutdown_grace", cfg.Worker.ShutdownGrace.String())
+	q := transcode.NewQueue(rdb)
+	go (&transcode.Reaper{Pool: pool, Q: q, Cfg: cfg.Worker, Log: log}).Run(ctx)
+	(&transcode.Loop{Q: q, W: w, Log: log}).Run(ctx)
+	log.Info("worker stopped")
+	return nil
 }

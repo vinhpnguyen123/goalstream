@@ -23,8 +23,9 @@ migrate: ## apply pending migrations (the API also does this at startup)
 test:
 	go test ./...
 
+# -timeout: the transcode package alone runs ~7.5 min on an M1 and over 10 (go's default) on CI
 test-integration: ## needs `make up`. -p 1: packages share goalstream_test and the test bucket, so they must not run in parallel
-	go test -tags integration -race -count=1 -p 1 ./...
+	go test -tags integration -race -count=1 -p 1 -timeout 20m ./...
 
 .PHONY: fixtures
 fixtures: ## generate synthetic test media into testdata/ (never real footage)
@@ -34,9 +35,8 @@ fixtures: ## generate synthetic test media into testdata/ (never real footage)
 api: ## run the API (migrates first)
 	go run ./cmd/api
 
-worker: ## run one transcode job: make worker JOB=<job_id>  (the queue loop arrives in M6)
-	@test -n "$(JOB)" || { echo "JOB=<job_id> required"; exit 1; }
-	go run ./cmd/worker -once $(JOB)
+worker: ## run the queue worker until Ctrl-C; JOB=<job_id> runs that one job and exits
+	go run ./cmd/worker $(if $(JOB),-once $(JOB))
 
 fe: ## frontend dev server on :5173, proxies /api to the API (run `npm ci` in web/ once)
 	cd web && npm run dev

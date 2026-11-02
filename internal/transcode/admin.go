@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -26,8 +27,8 @@ func (e *ActiveJobError) Error() string { return "job " + e.JobID + " is already
 
 // CreateJob queues a transcode of the clip — also when it is already hls: that is a
 // re-transcode and produces a new version. The partial unique index jobs_one_active_per_clip is
-// the guard: two active jobs would race the hls_version pointer. M5 does not push to Redis; the
-// job is run by hand (worker -once). M6 pushes after this row exists — Postgres first.
+// the guard: two active jobs would race the hls_version pointer. It does not push: the caller
+// pushes after this returns, so the row exists first (Postgres before Redis).
 func CreateJob(ctx context.Context, pool *pgxpool.Pool, clipID string) (string, error) {
 	var jobID string
 	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
@@ -160,4 +161,88 @@ func lockClipJobs(ctx context.Context, tx pgx.Tx, clipID string) error {
 		return fmt.Errorf("locking jobs of clip %s: %w", clipID, err)
 	}
 	return nil
+}
+
+// ClipStatus is GET /admin/clips/{id}/status: where the clip points, its newest job, and every
+// committed version (newest first).
+type ClipStatus struct {
+	SourceType string          `json:"source_type"`
+	HLSVersion *string         `json:"hls_version"`
+	LatestJob  *JobStatus      `json:"latest_job"`
+	Versions   []VersionStatus `json:"versions"`
+}
+
+type JobStatus struct {
+	ID            string    `json:"id"`
+	Status        string    `json:"status"`
+	Attempts      int       `json:"attempts"`
+	FailureReason *string   `json:"failure_reason"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+type VersionStatus struct {
+	HLSVersion string            `json:"hls_version"`
+	CreatedAt  time.Time         `json:"created_at"`
+	Renditions []RenditionStatus `json:"renditions"`
+}
+
+type RenditionStatus struct {
+	Height       int `json:"height"`
+	Width        int `json:"width"`
+	VideoBitrate int `json:"video_bitrate"`
+	Bandwidth    int `json:"bandwidth"`
+	SegmentCount int `json:"segment_count"`
+}
+
+// Status reads a clip's delivery state in one read-only snapshot, so the pointer, the job and
+// the versions agree with each other. A version exists only through its renditions rows — the
+// fenced commit wrote them — so orphan prefixes of failed or superseded attempts never appear.
+func Status(ctx context.Context, pool *pgxpool.Pool, clipID string) (ClipStatus, error) {
+	st := ClipStatus{Versions: []VersionStatus{}}
+	err := pgx.BeginTxFunc(ctx, pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+		err := tx.QueryRow(ctx, `SELECT source_type, hls_version::text FROM clips WHERE id = $1`, clipID).
+			Scan(&st.SourceType, &st.HLSVersion)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrClipNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("reading clip %s: %w", clipID, err)
+		}
+
+		var j JobStatus
+		err = tx.QueryRow(ctx, `
+			SELECT id::text, status, attempts, failure_reason, updated_at FROM transcode_jobs
+			 WHERE clip_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`, clipID).
+			Scan(&j.ID, &j.Status, &j.Attempts, &j.FailureReason, &j.UpdatedAt)
+		switch {
+		case err == nil:
+			st.LatestJob = &j
+		case !errors.Is(err, pgx.ErrNoRows):
+			return fmt.Errorf("reading the latest job of clip %s: %w", clipID, err)
+		}
+
+		rows, err := tx.Query(ctx, `
+			SELECT hls_version::text, min(created_at) OVER (PARTITION BY hls_version) AS v_created,
+			       height, width, video_bitrate, bandwidth, segment_count
+			  FROM renditions WHERE clip_id = $1
+			 ORDER BY v_created DESC, hls_version, height DESC`, clipID)
+		if err != nil {
+			return fmt.Errorf("reading versions of clip %s: %w", clipID, err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var v VersionStatus
+			var r RenditionStatus
+			if err := rows.Scan(&v.HLSVersion, &v.CreatedAt, &r.Height, &r.Width, &r.VideoBitrate, &r.Bandwidth, &r.SegmentCount); err != nil {
+				return err
+			}
+			if n := len(st.Versions); n == 0 || st.Versions[n-1].HLSVersion != v.HLSVersion {
+				st.Versions = append(st.Versions, v)
+			}
+			last := &st.Versions[len(st.Versions)-1]
+			last.Renditions = append(last.Renditions, r)
+		}
+		return rows.Err()
+	})
+	return st, err
 }

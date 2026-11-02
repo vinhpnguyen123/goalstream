@@ -23,6 +23,7 @@ import (
 	"github.com/vinhpnguyen123/goalstream/internal/handlers"
 	"github.com/vinhpnguyen123/goalstream/internal/recommend"
 	"github.com/vinhpnguyen123/goalstream/internal/storage"
+	"github.com/vinhpnguyen123/goalstream/internal/transcode"
 )
 
 const (
@@ -87,7 +88,7 @@ func run(ctx context.Context) error {
 
 	srv := &http.Server{
 		Addr: cfg.API.HTTPAddr,
-		Handler: (&handlers.Server{Pool: pool, Redis: rdb, Store: storage.New(cfg.S3), Cfg: cfg,
+		Handler: (&handlers.Server{Pool: pool, Redis: rdb, Queue: transcode.NewQueue(rdb), Store: storage.New(cfg.S3), Cfg: cfg,
 			DevUserID: devUserID, Signer: signer, Reco: reco}).Routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,

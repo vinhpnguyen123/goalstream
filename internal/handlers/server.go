@@ -14,11 +14,13 @@ import (
 	"github.com/vinhpnguyen123/goalstream/internal/middleware"
 	"github.com/vinhpnguyen123/goalstream/internal/recommend"
 	"github.com/vinhpnguyen123/goalstream/internal/storage"
+	"github.com/vinhpnguyen123/goalstream/internal/transcode"
 )
 
 type Server struct {
 	Pool  *pgxpool.Pool
-	Redis *redis.Client // rate limiter only in M1; it holds no truth
+	Redis *redis.Client // rate limiter, and the transcode queue through Queue; it holds no truth
+	Queue transcode.Queue
 	Store *storage.Client
 	Cfg   config.Config
 	// DevUserID is the AUTH_MODE=dev user, upserted at startup. Empty in any other mode.
@@ -81,7 +83,7 @@ func (s *Server) Routes() http.Handler {
 				r.With(middleware.RateLimit(s.Redis, middleware.RulePlay, middleware.ByUser)).
 					Get("/stream/{id}", s.streamClip)
 			}
-			// M5 admin: transcode and rollback. Never mounted in prod — production runs no
+			// Admin: transcode, rollback (M5), status (M6). Never mounted in prod — production runs no
 			// worker and Phase B is never deployed (decision 14), so a job there would only
 			// ever sit queued. Per-user limit (step 7), then the admin check (step 8).
 			if s.Cfg.AppEnv != "prod" {
@@ -90,6 +92,7 @@ func (s *Server) Routes() http.Handler {
 						middleware.RequireAdmin(s.Pool))
 					r.Post("/admin/clips/{id}/transcode", s.createJob)
 					r.Post("/admin/clips/{id}/delivery", s.setDelivery)
+					r.Get("/admin/clips/{id}/status", s.clipStatus)
 				})
 			}
 		})

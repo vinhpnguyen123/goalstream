@@ -25,6 +25,7 @@ import (
 	"github.com/vinhpnguyen123/goalstream/internal/recommend"
 	"github.com/vinhpnguyen123/goalstream/internal/storage"
 	"github.com/vinhpnguyen123/goalstream/internal/storage/storagetest"
+	"github.com/vinhpnguyen123/goalstream/internal/transcode"
 )
 
 type apiEnv struct {
@@ -75,7 +76,10 @@ func setupAPI(t *testing.T) apiEnv {
 	cfg.API = gateConfig()
 	cfg.API.AuthMode = "dev"
 	cfg.Reco = config.RecoConfig{ExploreRate: 0.3, ColdStartThreshold: 5, TopK: 50, NegPenalty: 0.5}
-	s := &Server{Pool: pool, Redis: rdb, Store: storage.New(cfg.S3), Cfg: cfg, DevUserID: dev,
+	// A namespace per test: a local `make worker` must never take a test's job ids.
+	q := transcode.Queue{R: rdb, NS: "test-" + uuid.NewString()}
+	t.Cleanup(func() { rdb.Del(context.Background(), q.NS+":queue", q.NS+":processing") })
+	s := &Server{Pool: pool, Redis: rdb, Queue: q, Store: storage.New(cfg.S3), Cfg: cfg, DevUserID: dev,
 		Reco: recommend.NewRecommender(pool, cfg.Reco, rand.New(rand.NewPCG(1, 2)))}
 	return apiEnv{s, s.Routes(), &http.Cookie{
 		Name: auth.InviteCookie, Value: auth.SignInvite(testSecret, "me", time.Now().Add(time.Hour)),

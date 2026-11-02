@@ -25,12 +25,16 @@ type Config struct {
 	Worker      WorkerConfig
 }
 
-// WorkerConfig is read by cmd/worker only. The queue, reaper and shutdown settings arrive in M6.
+// WorkerConfig is read by cmd/worker only: ValidateWorker.
 type WorkerConfig struct {
 	WorkDir           string        // per-attempt temp dirs go here; "" = the OS temp dir
 	TranscodeTimeout  time.Duration // one attempt, download → commit
 	MaxAttempts       int           // compared with >=, never =
 	UploadConcurrency int
+	JobStuckAfter     time.Duration // reaper: processing since longer than this = the worker died
+	RequeueAfter      time.Duration // reaper: re-push clock for queued/retryable rows, doubles as retry backoff
+	ReaperInterval    time.Duration
+	ShutdownGrace     time.Duration // after SIGTERM the job in hand gets this long before it is cancelled
 }
 
 // RecoConfig tunes selection (plan §11). Read by the API only.
@@ -138,10 +142,17 @@ func Load(getenv func(string) string) (Config, error) {
 			TranscodeTimeout:  p.duration("TRANSCODE_TIMEOUT", 10*time.Minute),
 			MaxAttempts:       p.integer("MAX_TRANSCODE_ATTEMPTS", 3),
 			UploadConcurrency: p.integer("UPLOAD_CONCURRENCY", 4),
+			JobStuckAfter:     p.duration("JOB_STUCK_AFTER", 15*time.Minute),
+			RequeueAfter:      p.duration("REQUEUE_AFTER", 60*time.Second),
+			ReaperInterval:    p.duration("REAPER_INTERVAL", 30*time.Second),
+			ShutdownGrace:     p.duration("SHUTDOWN_GRACE", 30*time.Second),
 		},
 	}
 	if w := c.Worker; w.TranscodeTimeout <= 0 || w.MaxAttempts < 1 || w.UploadConcurrency < 1 {
 		p.errs = append(p.errs, errors.New("TRANSCODE_TIMEOUT must be > 0, MAX_TRANSCODE_ATTEMPTS and UPLOAD_CONCURRENCY ≥ 1"))
+	}
+	if w := c.Worker; w.JobStuckAfter <= 0 || w.RequeueAfter <= 0 || w.ReaperInterval <= 0 || w.ShutdownGrace < 0 {
+		p.errs = append(p.errs, errors.New("JOB_STUCK_AFTER, REQUEUE_AFTER and REAPER_INTERVAL must be > 0, SHUTDOWN_GRACE ≥ 0"))
 	}
 	if r := c.Reco; r.ExploreRate < 0 || r.ExploreRate > 1 || r.ColdStartThreshold < 0 ||
 		r.TopK < 1 || r.TopK > 1000 || r.NegPenalty < 0 {
@@ -188,6 +199,17 @@ func (c Config) ValidateAPI() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// ValidateWorker checks what only the worker needs. A healthy attempt must always end — done or
+// failed — before the reaper calls it stuck, so the stuck threshold leaves TRANSCODE_TIMEOUT
+// plus 2m of slack (the failure handler, a slow commit). An unhealthy worker can still outlive
+// it; the fence makes that harmless, not this check.
+func (c Config) ValidateWorker() error {
+	if w := c.Worker; w.JobStuckAfter < w.TranscodeTimeout+2*time.Minute {
+		return fmt.Errorf("JOB_STUCK_AFTER (%s) must be ≥ TRANSCODE_TIMEOUT (%s) + 2m", w.JobStuckAfter, w.TranscodeTimeout)
+	}
+	return nil
 }
 
 // publicEndpointGuard rejects endpoints a browser on the internet cannot reach. A URL signed
