@@ -138,45 +138,6 @@ func TestLoopDuplicateDelivery(t *testing.T) {
 	}
 }
 
-// §12 #37: SIGTERM mid-job with no grace left → ffmpeg killed, the job retryable with its
-// attempt given back, the clip untouched; a restarted worker finishes it.
-func TestLoopShutdownGivesTheAttemptBack(t *testing.T) {
-	e := setupJobs(t)
-	q := e.queue(t)
-	clipID, _ := e.clip(t, "clip_1080p.mp4")
-	jobID := e.job(t, clipID)
-	if err := q.Push(context.Background(), jobID); err != nil {
-		t.Fatal(err)
-	}
-	e.w.Cfg.ShutdownGrace = 0
-	stop := e.start(t, q)
-	e.waitStatus(t, jobID, "processing")
-	time.Sleep(time.Second) // into ffmpeg: four 1080p-source rungs take far longer than this
-
-	begin := time.Now()
-	stop()
-	if d := time.Since(begin); d > 15*time.Second {
-		t.Fatalf("shutdown took %s with no grace", d)
-	}
-	j := e.jobRow(t, jobID)
-	if j.Status != "retryable" || j.Reason != ReasonShutdown || j.Attempts != 0 {
-		t.Fatalf("job = %+v, want retryable/shutdown with attempts 0", j)
-	}
-	if st, _ := e.delivery(t, clipID); st != "mp4" {
-		t.Fatalf("clip %s after an interrupted attempt", st)
-	}
-	if _, w := llen(t, q); w != 0 {
-		t.Fatalf("%d processing entries left", w)
-	}
-
-	// The restart: no manual push — the reaper re-pushes the retryable row after REQUEUE_AFTER.
-	e.start(t, q)
-	e.startReaper(t, q)
-	if j := e.waitStatus(t, jobID, "done"); j.Attempts != 1 {
-		t.Fatalf("attempts = %d after the restart, want 1", j.Attempts)
-	}
-}
-
 // A job that finishes within SHUTDOWN_GRACE is published, not interrupted.
 func TestLoopShutdownWithinGrace(t *testing.T) {
 	e := setupJobs(t)

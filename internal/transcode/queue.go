@@ -97,6 +97,9 @@ func (l *Loop) Run(ctx context.Context) {
 
 func (l *Loop) process(ctx context.Context, id string) {
 	err := l.W.Process(ctx, id)
+	if err == nil {
+		l.W.at("committed")
+	}
 	var f *Failure
 	switch {
 	case err == nil, errors.Is(err, ErrSuperseded), errors.As(err, &f):

@@ -117,7 +117,8 @@ type Worker struct {
 	// put uploads one object; nil means Store.PutFile. A test seam that records upload order.
 	put func(ctx context.Context, key, path, contentType, cacheControl string) error
 	// hook is a test seam (§12 #31, #32), called at named steps of an attempt: "uploaded"
-	// (everything but the master) and "mastered" (master written, commit next). nil in production.
+	// (everything but the master), "mastered" (master written, commit next) and, from Loop,
+	// "committed" (commit done, LREM next). nil in production.
 	hook func(step string)
 }
 
