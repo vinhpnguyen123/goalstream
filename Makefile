@@ -59,6 +59,10 @@ latency: ## p50/p95 of GET /next over 1000 warm requests (needs `make api` in AU
 admin: ## grant is_admin: make admin EMAIL=me@x.com   (REVOKE=1 to demote)
 	go run ./cmd/ingest admin -email "$(EMAIL)" $(if $(REVOKE),-revoke)
 
+.PHONY: batch
+batch: ## M7: queue never-migrated mp4 clips and report until done: make batch LIMIT=3   (no LIMIT = all)
+	go run ./cmd/ingest transcode-batch -wait $(if $(LIMIT),-limit $(LIMIT))
+
 # --- production (M4.5): cmd/ingest run from this laptop against R2 + Render Postgres -------
 # Every target reads ONLY .env.prod (gitignored) via scripts/prod.sh. Render's Postgres admits
 # external connections only from the allow-listed IP: add yours before, remove it after.
