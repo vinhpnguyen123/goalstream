@@ -11,6 +11,10 @@
 //	                 queue a transcode for the next N mp4 clips (0 = all) that were never migrated
 //	                 and have no active job; -wait reports until every job is done or failed.
 //	                 The worker (make worker) does the transcoding.
+//	ingest verify-hls
+//	                 check every clip still plays: original.mp4 present; for hls clips the live
+//	                 version's playlists and segment counts, and ffprobe of the master. Exit 1 on
+//	                 any problem.
 package main
 
 import (
@@ -50,7 +54,7 @@ func main() {
 
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: ingest migrate|run|tags|reembed|admin|transcode-batch")
+		return fmt.Errorf("usage: ingest migrate|run|tags|reembed|admin|transcode-batch|verify-hls")
 	}
 	cfg, err := config.Load(os.Getenv)
 	if err != nil {
@@ -67,6 +71,8 @@ func run(ctx context.Context, args []string) error {
 		return setAdmin(ctx, cfg, args[1:])
 	case "transcode-batch":
 		return transcodeBatch(ctx, cfg, args[1:])
+	case "verify-hls":
+		return verifyHLS(ctx, cfg)
 	default:
 		return fmt.Errorf("unknown subcommand %q", args[0])
 	}
@@ -262,4 +268,26 @@ func printReport(r transcode.Report, took time.Duration) {
 	for reason, k := range r.Reasons {
 		fmt.Printf("  failed       %d × %s\n", k, reason)
 	}
+}
+
+// verifyHLS is `make verify-hls`: the evidence for M7's "every clip plays, originals still
+// archived". One line per problem, then a summary; exit 1 if anything is wrong.
+func verifyHLS(ctx context.Context, cfg config.Config) error {
+	pool, err := db.Connect(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	r, err := transcode.Verify(ctx, pool, storage.New(cfg.S3))
+	if err != nil {
+		return err
+	}
+	for _, p := range r.Problems {
+		fmt.Printf("%s  %s\n", p.ClipID, p.What)
+	}
+	fmt.Printf("checked %d clips (mp4 %d · hls %d): %d problems\n", r.MP4+r.HLS, r.MP4, r.HLS, len(r.Problems))
+	if len(r.Problems) > 0 {
+		return fmt.Errorf("%d problems", len(r.Problems))
+	}
+	return nil
 }

@@ -63,6 +63,10 @@ admin: ## grant is_admin: make admin EMAIL=me@x.com   (REVOKE=1 to demote)
 batch: ## M7: queue never-migrated mp4 clips and report until done: make batch LIMIT=3   (no LIMIT = all)
 	go run ./cmd/ingest transcode-batch -wait $(if $(LIMIT),-limit $(LIMIT))
 
+.PHONY: verify-hls
+verify-hls: ## M7: check every clip still plays (original present, hls playlists/segments, ffprobe); exit 1 on any problem
+	go run ./cmd/ingest verify-hls
+
 # --- production (M4.5): cmd/ingest run from this laptop against R2 + Render Postgres -------
 # Every target reads ONLY .env.prod (gitignored) via scripts/prod.sh. Render's Postgres admits
 # external connections only from the allow-listed IP: add yours before, remove it after.
