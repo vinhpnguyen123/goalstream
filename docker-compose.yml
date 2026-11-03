@@ -46,6 +46,10 @@ services:
     environment:
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173}
     ports: ["127.0.0.1:8081:8081"]
+    # M9: the only address deploy/local/hls-read-policy.json admits for anonymous hls/ reads.
+    networks:
+      default:
+        ipv4_address: 172.30.0.10
     volumes:
       - ./deploy/local/nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
     depends_on: [minio]
@@ -63,6 +67,13 @@ services:
       - ./deploy/local/minio-init.sh:/minio-init.sh:ro
       - ./deploy/local/hls-read-policy.json:/hls-read-policy.json:ro
     entrypoint: ["/bin/sh", "/minio-init.sh"]
+
+# M9: a fixed subnet so nginx's address is known to the MinIO policy.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
 
 volumes:
   pgdata:

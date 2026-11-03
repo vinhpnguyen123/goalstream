@@ -278,7 +278,10 @@ func verifyHLS(ctx context.Context, cfg config.Config) error {
 		return err
 	}
 	defer pool.Close()
-	r, err := transcode.Verify(ctx, pool, storage.New(cfg.S3))
+	if cfg.API.HLSBaseURL == "" { // M9: MinIO serves hls/ unsigned only to nginx
+		return errors.New("verify-hls probes through the nginx cache: set HLS_BASE_URL (make up)")
+	}
+	r, err := transcode.Verify(ctx, pool, storage.New(cfg.S3), cfg.API.HLSBaseURL+"/"+cfg.S3.Bucket)
 	if err != nil {
 		return err
 	}

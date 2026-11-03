@@ -18,9 +18,11 @@ import (
 	"github.com/vinhpnguyen123/goalstream/internal/storage/storagetest"
 )
 
-// §12 #28, local exposure. deploy/local/hls-read-policy.json lets anything on this machine read
-// clips/*/hls/* without a signature (the HLS player's relative requests carry none); originals,
-// everything else and listing stay private; and MinIO answers on 127.0.0.1 only.
+// §12 #28 and #39 (MinIO half), local exposure. deploy/local/hls-read-policy.json lets only
+// nginx's address (172.30.0.10) read clips/*/hls/* without a signature — the HLS player's
+// relative requests carry none, and since M9 they reach MinIO only through nginx. A bare
+// unsigned URL from this machine is refused; originals, everything else and listing stay
+// private; and MinIO answers on 127.0.0.1 only.
 func TestLocalHLSExposure(t *testing.T) {
 	ctx := context.Background()
 	cfg := storagetest.Config(t)
@@ -37,8 +39,8 @@ func TestLocalHLSExposure(t *testing.T) {
 	}
 	base := cfg.S3.Endpoint + "/" + cfg.S3.Bucket + "/"
 	for key, want := range map[string]int{
-		"clips/c1/hls/v1/master.m3u8":       200,
-		"clips/c1/hls/v1/720p/seg_00000.ts": 200,
+		"clips/c1/hls/v1/master.m3u8":       403, // only from nginx's address (M9)
+		"clips/c1/hls/v1/720p/seg_00000.ts": 403,
 		"clips/c1/original.mp4":             403, // presigned only, ever
 		"clips/c1/other.txt":                403,
 		"hls/v1/master.m3u8":                403, // the policy is scoped to clips/*/hls/*
@@ -51,6 +53,26 @@ func TestLocalHLSExposure(t *testing.T) {
 		res.Body.Close()
 		if res.StatusCode != want {
 			t.Errorf("unsigned GET %s = %d, want %d", key, res.StatusCode, want)
+		}
+	}
+
+	// ACCEPTED GAP (M9, verified): MinIO takes aws:SourceIp from these headers, so a process on
+	// this machine that names nginx's address gets through. Pinned so a MinIO upgrade that stops
+	// trusting them is noticed (then the README's gap entry goes). Anything that can send this
+	// can also read the miniodata volume through Docker; a browser cannot set these headers.
+	for _, h := range []string{"X-Forwarded-For", "X-Real-IP"} {
+		req, err := http.NewRequestWithContext(ctx, "GET", base+"clips/c1/hls/v1/master.m3u8", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set(h, "172.30.0.10")
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if res.StatusCode != 200 {
+			t.Errorf("unsigned GET with %s = %d; MinIO no longer trusts it — update the README gap", h, res.StatusCode)
 		}
 	}
 

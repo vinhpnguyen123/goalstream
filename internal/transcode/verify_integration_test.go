@@ -5,6 +5,7 @@ package transcode
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 
@@ -85,7 +86,11 @@ func TestVerify(t *testing.T) {
 	plainMP4, _ := e.clip(t, "clip_576p.mp4")
 	noOriginal, _ := e.clip(t, "")
 
-	r, err := Verify(ctx, e.pool, e.w.Store)
+	hlsBase := os.Getenv("HLS_BASE_URL")
+	if hlsBase == "" {
+		t.Fatal("HLS_BASE_URL must point at the local nginx (make up)")
+	}
+	r, err := Verify(ctx, e.pool, e.w.Store, hlsBase+"/"+e.cfg.S3.Bucket)
 	if err != nil {
 		t.Fatal(err)
 	}

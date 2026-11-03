@@ -50,7 +50,7 @@ func TestNginxCache(t *testing.T) {
 		cache, body string
 		h           http.Header
 	}
-	do := func(method, path, origin string) resp {
+	do := func(method, path, origin string, hdr ...string) resp {
 		t.Helper()
 		req, err := http.NewRequestWithContext(ctx, method, base+path, nil)
 		if err != nil {
@@ -58,6 +58,9 @@ func TestNginxCache(t *testing.T) {
 		}
 		if origin != "" {
 			req.Header.Set("Origin", origin)
+		}
+		for i := 0; i+1 < len(hdr); i += 2 {
+			req.Header.Set(hdr[i], hdr[i+1])
 		}
 		res, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -97,6 +100,13 @@ func TestNginxCache(t *testing.T) {
 	if !strings.Contains(r.h.Get("Access-Control-Expose-Headers"), "X-Cache-Status") {
 		t.Errorf("X-Cache-Status not exposed to the page: %q", r.h.Get("Access-Control-Expose-Headers"))
 	}
+
+	// MinIO admits hls/ only from nginx's address and takes that address from forwarding headers
+	// when present (M9): nginx must not pass the client's on, or a cold read would be refused.
+	fwd := prefix + "720p/seg_00002.ts"
+	put(fwd, "fwd")
+	want(do("GET", fwd, "", "X-Forwarded-For", "203.0.113.9", "X-Real-IP", "203.0.113.9",
+		"Forwarded", "for=203.0.113.9"), 200, "MISS")
 
 	// Never cache a non-200: a segment that is missing now is served the moment it exists.
 	late := prefix + "720p/seg_00001.ts"
