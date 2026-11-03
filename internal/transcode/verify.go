@@ -43,11 +43,12 @@ type verifyRung struct{ height, segments int }
 //   - hls clips: ffprobe opens the master through the local nginx cache, unsigned, the URL /play
 //     returns — which makes it open every variant playlist and its first segment, as a player
 //     does — and sees one video stream per rung, at the rung's height. hlsRoot is
-//     <HLS_BASE_URL>/<bucket>: since M9 MinIO serves hls/ unsigned only to nginx.
+//     <HLS_BASE_URL>/<bucket>: since M9 MinIO serves hls/ unsigned only to nginx, and nginx
+//     only to a request carrying cookie ("gs_invite=…") — ffprobe sends it on every request.
 //
 // Clips run one at a time: ~0.5 s each, a minute for the catalogue. Storage and ffprobe errors
 // are problems, not failures of the run; only a database error aborts it.
-func Verify(ctx context.Context, pool *pgxpool.Pool, store *storage.Client, hlsRoot string) (VerifyReport, error) {
+func Verify(ctx context.Context, pool *pgxpool.Pool, store *storage.Client, hlsRoot, cookie string) (VerifyReport, error) {
 	clips, err := verifyClips(ctx, pool)
 	if err != nil {
 		return VerifyReport{}, err
@@ -59,7 +60,7 @@ func Verify(ctx context.Context, pool *pgxpool.Pool, store *storage.Client, hlsR
 		} else {
 			r.MP4++
 		}
-		for _, what := range verifyOne(ctx, store, hlsRoot, c) {
+		for _, what := range verifyOne(ctx, store, hlsRoot, cookie, c) {
 			r.Problems = append(r.Problems, Problem{c.id, what})
 		}
 	}
@@ -95,7 +96,7 @@ func verifyClips(ctx context.Context, pool *pgxpool.Pool) ([]verifyClip, error) 
 	return clips, rows.Err()
 }
 
-func verifyOne(ctx context.Context, store *storage.Client, hlsRoot string, c verifyClip) []string {
+func verifyOne(ctx context.Context, store *storage.Client, hlsRoot, cookie string, c verifyClip) []string {
 	var out []string
 	if _, err := store.Size(ctx, c.prefix+"original.mp4"); errors.Is(err, storage.ErrNotFound) {
 		out = append(out, "original.mp4 missing")
@@ -151,7 +152,7 @@ func verifyOne(ctx context.Context, store *storage.Client, hlsRoot string, c ver
 		}
 	}
 
-	got, err := probeHeights(ctx, hlsRoot+"/"+base+"master.m3u8")
+	got, err := probeHeights(ctx, hlsRoot+"/"+base+"master.m3u8", cookie)
 	if err != nil {
 		return append(out, err.Error())
 	}
@@ -191,11 +192,14 @@ func segmentURIs(ctx context.Context, store *storage.Client, key string) ([]stri
 var signature = regexp.MustCompile(`\?[^\s'"]*`)
 
 // probeHeights is the heights of every video stream ffprobe finds behind the master, tallest
-// first. Variants are fetched unsigned by relative URI, exactly as the browser does.
-func probeHeights(ctx context.Context, url string) ([]int, error) {
+// first. Variants are fetched unsigned by relative URI, exactly as the browser does; ffmpeg's
+// HLS demuxer passes -headers on to them. The cookie is a credential: it rides in the argv,
+// which run never puts in an error.
+func probeHeights(ctx context.Context, url, cookie string) ([]int, error) {
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
-	out, _, err := run(ctx, "ffprobe", "-v", "error", "-print_format", "json", "-show_entries", "stream=codec_type,height", url)
+	out, _, err := run(ctx, "ffprobe", "-v", "error", "-print_format", "json", "-show_entries", "stream=codec_type,height",
+		"-headers", "Cookie: "+cookie+"\r\n", url)
 	if err != nil {
 		return nil, fmt.Errorf("ffprobe master: %s", strings.TrimSpace(signature.ReplaceAllString(err.Error(), "?<redacted>")))
 	}

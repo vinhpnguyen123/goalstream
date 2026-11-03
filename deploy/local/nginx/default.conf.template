@@ -1,7 +1,12 @@
-# Local cache in front of MinIO (M8, IMPLEMENTATION_PLAN §13). Only clips/*/hls/* is proxied:
+# Local cache in front of MinIO (M8), gated by the invite cookie (M9) — IMPLEMENTATION_PLAN §13. Only clips/*/hls/* is proxied:
 # everything under a version prefix is immutable, and the only mutable pointer
 # (clips.hls_version) reaches the browser through the uncached API — so 7 days needs no purge.
 # The image's entrypoint substitutes ${CORS_ORIGIN}; nginx's own variables are left alone.
+
+# M9: gs_invite is checked here (invite.js) before the cache is consulted.
+js_path /etc/nginx/njs/;
+js_import invite from invite.js;
+js_set $invite_ok invite.verify;
 
 proxy_cache_path /var/cache/nginx/hls levels=1:2 keys_zone=hls:10m max_size=5g inactive=7d use_temp_path=off;
 
@@ -20,6 +25,12 @@ server {
     location ~ ^/[^/]+/clips/[^/]+/hls/. {
         limit_except GET HEAD { deny all; }
 
+        # M9: the invite cookie is the credential. `return` runs in the rewrite phase, before
+        # proxy_cache is consulted — a cached segment is never served without a valid cookie.
+        if ($invite_ok != "1") {
+            return 403;
+        }
+
         # $uri drops the query string upstream and from the key: a signature must not fragment
         # the cache, and MinIO serves hls/ anonymously anyway (deploy/local/hls-read-policy.json).
         proxy_pass http://minio$uri;
@@ -28,6 +39,7 @@ server {
         proxy_set_header X-Forwarded-For "";
         proxy_set_header X-Real-IP "";
         proxy_set_header Forwarded "";
+        proxy_set_header Cookie ""; # the invite is checked here; MinIO never sees it
         proxy_cache hls;
         proxy_cache_key $uri;
         proxy_cache_valid 200 7d; # the only rule: a 403/404/5xx is never cached
@@ -43,6 +55,8 @@ server {
 
         add_header X-Cache-Status $upstream_cache_status always;
         add_header Access-Control-Allow-Origin ${CORS_ORIGIN} always;
+        # hls.js sends the cookie (withCredentials), which needs this AND an exact origin, never *.
+        add_header Access-Control-Allow-Credentials true always;
         add_header Access-Control-Expose-Headers X-Cache-Status always;
     }
 

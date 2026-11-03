@@ -6,10 +6,12 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
+	"github.com/vinhpnguyen123/goalstream/internal/auth"
 	"github.com/vinhpnguyen123/goalstream/internal/config"
 	"github.com/vinhpnguyen123/goalstream/internal/storage"
 )
@@ -46,4 +48,20 @@ func Empty(t *testing.T, c config.S3Config) {
 			}
 		}
 	}
+}
+
+// InviteCookie is a Cookie header value ("gs_invite=…") the local nginx accepts (M9): signed
+// with INVITE_SECRET for an id in INVITE_CODES as nginx reads them — from the environment, not a
+// test's config, which may carry its own gate settings — valid for an hour.
+func InviteCookie(t *testing.T) string {
+	t.Helper()
+	cfg, err := config.Load(os.Getenv)
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	for id := range cfg.API.InviteCodes {
+		return auth.InviteCookie + "=" + auth.SignInvite(cfg.API.InviteSecret, id, time.Now().Add(time.Hour))
+	}
+	t.Fatal("INVITE_CODES is empty: nginx would refuse every request")
+	return ""
 }

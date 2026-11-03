@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/vinhpnguyen123/goalstream/internal/storage/storagetest"
 	"github.com/vinhpnguyen123/goalstream/internal/transcode"
 )
 
@@ -506,9 +507,15 @@ func TestPlayThroughCache(t *testing.T) {
 		}
 		return d["type"].(string), u
 	}
+	cookie := storagetest.InviteCookie(t) // M9: what the gate set in the browser
 	fetch := func(u *url.URL) (int, string) {
 		t.Helper()
-		res, err := http.Get(u.String())
+		req, err := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Cookie", cookie)
+		res, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}
