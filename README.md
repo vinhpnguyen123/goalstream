@@ -616,3 +616,102 @@ make verify-hls
 | Decoding every segment in the verifier: it checks that every named segment exists and opens the first of each variant | segments can be corrupted in storage after being written (bit rot, partial overwrite) — then store checksums at commit, or decode each variant in full |
 | Retrying rolled-back clips automatically: they stay MP4 until an admin re-transcodes them | rollbacks become routine rather than a deliberate decision |
 | Cleaning up old and orphaned versions (decision D9): they accumulate | storage cost matters — then a reaper for prefixes that are neither live nor a rollback target |
+
+### M8 — caching layer, local (`m8-cache`)
+
+**What it does.** HLS playback now goes through an nginx cache in front of MinIO. The first
+viewer of a segment pays the trip to storage; every later viewer of that segment is served from
+nginx's disk. It is the role a CDN plays in production, demonstrated on localhost — Phase B is
+never deployed.
+
+**How it works.**
+
+- *nginx* (`deploy/local/nginx/default.conf.template`, started by `make up`, `127.0.0.1:8081`)
+  proxies `/<bucket>/clips/*/hls/*` only, GET/HEAD only. Anything else — originals included — is
+  a 404 from nginx without reaching MinIO.
+- *Everything under `hls/` is cached for 7 days, with no purge.* Every object under
+  `hls/<version>/` is immutable by construction (one prefix per attempt, master written last).
+  The only mutable thing is which version is live, and that is `clips.hls_version`, delivered by
+  the uncached API. So **playlists need no short TTL**: a re-transcode or a rollback changes the
+  URL the API hands out, never the bytes behind an old one — the same pattern as hashed asset
+  filenames behind an uncached HTML page.
+- *The cache key is `$uri`*, never the query string: a presign signature (or any cache-buster) in
+  the query must not fragment the cache. The upstream request drops the query too.
+- *Only a 200 is cached.* A segment that 404s now is served the moment it exists.
+- *nginx's config is the whole policy*: upstream `Cache-Control`, `Expires`, `Set-Cookie` and
+  `Vary` are ignored. MinIO sends `Vary: Origin` — honoured, a browser and curl would each get
+  their own copy of every segment.
+- *CORS* names one fixed origin (`CORS_ORIGIN`, the web app). MinIO echoes the request's Origin;
+  cached, that would replay the first viewer's origin to everyone.
+- *`proxy_cache_lock`*: a cold segment requested by many viewers at once reaches MinIO once.
+- *The access log* records `$uri` only — never `$request` or `$args`, which could carry a
+  signature. `make cache-stats [SINCE=10m]` reads it.
+- */play* (`HLS_BASE_URL`, an origin, local only — refused at startup in prod): for an HLS clip
+  it returns the unsigned `<HLS_BASE_URL>/<bucket>/<prefix>hls/<version>/master.m3u8`, so hls.js's
+  relative requests for renditions and segments go through nginx too. `?format=mp4` and MP4 clips
+  stay presigned against MinIO. No new exposure: `hls/` was already anonymous-read on 127.0.0.1
+  since M5; M9 puts the invite cookie in front of it.
+
+**The measured result.** 10 HLS clips, real hls.js in Chrome, each clip buffered to the end (a
+viewer who watches all of it), cold cache at the start. Each pass is a new viewer: a per-run,
+per-pass query string makes the browser's own cache miss, while nginx's key ignores it.
+
+| Pass | Viewer | Rung hls.js chose | Requests | Hit rate | Bytes | Byte hit rate |
+|---|---|---|---|---|---|---|
+| 1 | desktop, cold cache | 1 probe segment at 360p, then 720p | 190 | 0 % | 220.4 MB | 0 % |
+| 2 | desktop, same 10 clips | the same | 190 | **100 %** | 220.4 MB | **100 %** |
+| 3 | phone-sized player (`capLevelToPlayerSize`) | 360p only | 180 | 22 % | 62.2 MB | 11.5 % |
+| **All** | | | **550** | **40.0 %** | **499.5 MB** | **44.8 %** |
+
+Counted twice, in the browser (`X-Cache-Status` per response) and from the nginx log
+(`make cache-stats`); the two agree. MinIO served 275.5 MB of the 499.5 MB. The cache held
+265 MB afterwards for 10 clips. No query string appears anywhere in the nginx log.
+
+What the numbers say:
+
+- A repeat viewer **on the same rung** is served entirely from cache — the 100 % is what
+  immutable versions buy.
+- A viewer **on a different rung** shares almost nothing: only the playlists and the one 360p
+  segment per clip that hls.js had used to measure bandwidth were already cached. ABR splits
+  the cache by rung, so the real hit rate depends on how viewers' networks and screens spread
+  across the ladder, not just on popularity.
+- On localhost hls.js always settles on 720p. Real networks would spread viewers across rungs and
+  make pass 3 the common case, so 100 % is the ceiling, not the expectation.
+- A replay **in the same browser** never reaches nginx: segments carry
+  `Cache-Control: immutable`, so the browser keeps them. The shared cache only pays off
+  **across** viewers — which is exactly what a CDN is for.
+
+**Why a CDN is needed at all.** Every viewer pulls about 22 MB per clip at 720p. Served from
+storage, egress and storage request count grow with viewers × clips; behind a cache they grow
+with clips × rungs, once per cache location. A single nginx on one machine does that for one
+location. Viewers spread across a continent need it at many locations close to them — that is
+the CDN. The design that makes it trivial is already in place: immutable versioned paths, a key
+without the query string, and a mutable pointer that lives in the uncached API.
+
+**Measurement pitfall I hit.** The first run reused the URLs of an aborted one. The browser had
+cached them as immutable — with their `X-Cache-Status: MISS` header — so the "measurement" never
+left the browser. The browser counted MISSes and the nginx log was empty. Cross-checking the
+server side caught it; a fresh nonce per run fixed it.
+
+**Run it locally.**
+
+```bash
+make up                              # starts nginx on 127.0.0.1:8081 with the rest
+# .env: HLS_BASE_URL=http://localhost:8081, then restart `make api`
+make fe                              # play an HLS clip: DevTools shows X-Cache-Status per request
+make cache-stats SINCE=10m           # hit rate and byte hit rate from nginx's log
+docker compose up -d --force-recreate nginx   # cold cache
+```
+
+**What I learned.** _(to write in my own words)_
+
+**What I chose not to build — and when that choice would be wrong.**
+
+| Not built | Would be wrong when |
+|---|---|
+| A real CDN (CloudFront, Cloudflare): one local nginx | viewers are not on this machine — the streaming tier is never deployed (D11) |
+| Cache purge or invalidation | any path under `hls/` ever holds bytes that change — today none can |
+| The `slice` module or range-aware caching | clients request byte ranges of large files; HLS segments are ~1 MB and fetched whole |
+| Cache warming or pre-fetching the next rung | first-viewer latency matters, e.g. a new clip expected to go viral |
+| A persistent cache volume: recreating the container empties it | a restart must not cost a cold cache — on a laptop it is a feature for measuring |
+| Access control: anyone on this machine can read `hls/` | that is M9 — the invite cookie, checked by nginx before the cache |
