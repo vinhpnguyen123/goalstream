@@ -51,8 +51,8 @@ export default function Player(props: Props) {
     hls.current = null
     if (at > 0) v.addEventListener('loadedmetadata', () => { v.currentTime = at }, { once: true })
     if (HlsJS && chooseEngine(p.type, HlsJS.isSupported(), v.canPlayType(HLS_MIME) !== '') === 'hlsjs') {
-      // Only the master is presigned; hls.js fetches renditions and segments relative to it,
-      // unsigned (the local hls/ read policy, plan §8). Quality switching happens here, in JS.
+      // Only the master is presigned — or, with HLS_BASE_URL (M8), an unsigned nginx URL; hls.js
+      // fetches renditions and segments relative to it, unsigned (the local hls/ read policy, plan §8). Quality switching happens here, in JS.
       // startLevel -1: start from the rung the measured bandwidth allows (hls.js loads the lowest
       // rung's first segment to measure), not the first rung in the master (720p). Measured
       // 2026-11-01 on Slow 4G: starting at 720p cost a whole 1.5 MB segment before the first

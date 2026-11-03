@@ -106,6 +106,14 @@ func (s *Server) playClip(w http.ResponseWriter, r *http.Request) {
 	if pb.SourceType == "hls" && r.URL.Query().Get("format") != "mp4" {
 		typ, key = "hls", pb.Prefix+"hls/"+pb.HLSVersion+"/master.m3u8"
 	}
+	// M8, local only: hls goes unsigned through the nginx cache, so every relative request
+	// after it does too. hls/ is already anonymous-read on 127.0.0.1, and a signature would only
+	// be stripped from the key. expires_at keeps the TTL so the player's re-call path is unchanged.
+	if base := s.Cfg.API.HLSBaseURL; typ == "hls" && base != "" {
+		httpx.JSON(w, r, http.StatusOK, map[string]any{"type": typ, "url": base + "/" + s.Cfg.S3.Bucket + "/" + key,
+			"expires_at": time.Now().Add(s.Cfg.S3.PresignTTL).UTC()})
+		return
+	}
 	url, exp, err := s.Store.PresignGet(r.Context(), key)
 	if err != nil {
 		httpx.Internal(w, r, err)

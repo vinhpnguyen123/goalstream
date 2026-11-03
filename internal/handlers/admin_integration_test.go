@@ -5,8 +5,12 @@ package handlers
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -456,6 +460,85 @@ func TestListClipsThumbnail(t *testing.T) {
 			if has {
 				t.Errorf("clip without a thumbnail has thumbnail_url %q", thumb)
 			}
+		}
+	}
+}
+
+// M8: with HLS_BASE_URL set, /play sends hls through the local nginx cache unsigned, and the
+// player's relative requests follow it there — a repeat playback is a cache HIT. mp4, and the
+// ?format=mp4 fallback, stay presigned against MinIO.
+func TestPlayThroughCache(t *testing.T) {
+	ctx := context.Background()
+	e := setupAPI(t)
+	e.s.Cfg.API.HLSBaseURL = os.Getenv("HLS_BASE_URL")
+	if e.s.Cfg.API.HLSBaseURL == "" {
+		t.Fatal("HLS_BASE_URL must point at the local nginx (make up)")
+	}
+	clip := e.seedClip(t, "c", time.Now(), []byte("x"))
+	v := e.version(t, clip)
+	if _, err := e.s.Pool.Exec(ctx, `UPDATE clips SET source_type = 'hls', hls_version = $2 WHERE id = $1`, clip, v); err != nil {
+		t.Fatal(err)
+	}
+	base := "clips/" + clip + "/hls/" + v + "/"
+	f := filepath.Join(t.TempDir(), "obj")
+	for key, body := range map[string]string{"master.m3u8": "#EXTM3U\n360p/index.m3u8\n", "360p/index.m3u8": "#EXTM3U\nseg_00000.ts\n"} {
+		if err := os.WriteFile(f, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.s.Store.PutFile(ctx, base+key, f, "application/vnd.apple.mpegurl", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	play := func(query string) (typ string, u *url.URL) {
+		t.Helper()
+		rec, body := e.get(t, "/api/v1/clips/"+clip+"/play"+query, true)
+		if rec.Code != 200 {
+			t.Fatalf("play%s: %d %v", query, rec.Code, body)
+		}
+		d := data(body)
+		u, err := url.Parse(d["url"].(string))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if exp, err := time.Parse(time.RFC3339Nano, d["expires_at"].(string)); err != nil || exp.Before(time.Now()) {
+			t.Fatalf("expires_at %v", d["expires_at"])
+		}
+		return d["type"].(string), u
+	}
+	fetch := func(u *url.URL) (int, string) {
+		t.Helper()
+		res, err := http.Get(u.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+		return res.StatusCode, res.Header.Get("X-Cache-Status")
+	}
+
+	typ, master := play("")
+	if want := e.s.Cfg.API.HLSBaseURL + "/" + e.s.Cfg.S3.Bucket + "/" + base + "master.m3u8"; typ != "hls" || master.String() != want {
+		t.Fatalf("hls play = %s %s%s (signed: %t), want hls %s", typ, master.Host, master.Path, master.RawQuery != "", want)
+	}
+	variant := master.ResolveReference(&url.URL{Path: "360p/index.m3u8"}) // what hls.js requests next
+	for i, want := range []string{"MISS", "HIT"} {                        // first playback, then the repeat
+		for _, u := range []*url.URL{master, variant} {
+			if code, cache := fetch(u); code != 200 || cache != want {
+				t.Errorf("playback %d: GET %s = %d %q, want 200 %q", i+1, u.Path, code, cache, want)
+			}
+		}
+	}
+
+	// The structural fallback, and a clip that is still mp4, never go through the cache.
+	public, _ := url.Parse(e.s.Cfg.S3.PublicEndpoint)
+	_, fallback := play("?format=mp4")
+	mp4Clip := e.seedClip(t, "plain", time.Now(), []byte("x"))
+	_, body := e.get(t, "/api/v1/clips/"+mp4Clip+"/play", true)
+	plain, _ := url.Parse(data(body)["url"].(string))
+	for name, u := range map[string]*url.URL{"?format=mp4": fallback, "mp4 clip": plain} {
+		if u.Host != public.Host || u.Query().Get("X-Amz-Signature") == "" {
+			t.Errorf("%s: host %s, want presigned on %s", name, u.Host, public.Host) // never print the query: a signature
 		}
 	}
 }

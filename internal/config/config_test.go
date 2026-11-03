@@ -79,6 +79,10 @@ func TestLoadErrors(t *testing.T) {
 		{"NaN float", map[string]string{"NEG_PENALTY": "NaN"}, []string{"NEG_PENALTY must be a number"}},
 		{"explore rate above 1", map[string]string{"EXPLORE_RATE": "1.5"}, []string{"EXPLORE_RATE must be in [0,1]"}},
 		{"top k zero", map[string]string{"RECO_TOP_K": "0"}, []string{"RECO_TOP_K 1–1000"}},
+		{"hls base url with path", map[string]string{"HLS_BASE_URL": "http://localhost:8081/goalstream"}, []string{"HLS_BASE_URL must be an origin"}},
+		{"hls base url no scheme", map[string]string{"HLS_BASE_URL": "localhost:8081"}, []string{"HLS_BASE_URL must be an origin"}},
+		{"hls base url in prod", map[string]string{"APP_ENV": "prod", "S3_PUBLIC_ENDPOINT": "https://abc123.r2.cloudflarestorage.com",
+			"HLS_BASE_URL": "https://media.example.com"}, []string{"HLS_BASE_URL is refused in prod"}},
 		{"invite duplicate id", map[string]string{"INVITE_CODES": "me:abc,me:def"}, []string{`duplicate id "me"`}},
 	}
 	for _, tc := range cases {
@@ -103,6 +107,15 @@ func TestProdAcceptsPublicEndpoint(t *testing.T) {
 	}))
 	if err != nil {
 		t.Fatalf("public R2 endpoint rejected: %v", err)
+	}
+}
+
+func TestHLSBaseURLTrimmed(t *testing.T) {
+	for in, want := range map[string]string{"": "", "http://localhost:8081": "http://localhost:8081", "http://localhost:8081/": "http://localhost:8081"} {
+		c, err := Load(env(map[string]string{"HLS_BASE_URL": in}))
+		if err != nil || c.API.HLSBaseURL != want {
+			t.Errorf("HLS_BASE_URL %q → %q, %v; want %q", in, c.API.HLSBaseURL, err, want)
+		}
 	}
 }
 
