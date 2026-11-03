@@ -246,3 +246,39 @@ func Status(ctx context.Context, pool *pgxpool.Pool, clipID string) (ClipStatus,
 	})
 	return st, err
 }
+
+// Stats is GET /admin/stats: the migration's progress at a glance. Every key is present, zero
+// when nothing has it, so the caller never has to tell "none" from "missing".
+type Stats struct {
+	ClipsBySourceType map[string]int `json:"clips_by_source_type"`
+	JobsByStatus      map[string]int `json:"jobs_by_status"`
+}
+
+// ReadStats counts clips per source_type and jobs per status in one read-only snapshot, so a
+// commit landing between the two counts cannot show a clip as hls while its job is still active.
+func ReadStats(ctx context.Context, pool *pgxpool.Pool) (Stats, error) {
+	st := Stats{
+		ClipsBySourceType: map[string]int{"mp4": 0, "hls": 0},
+		JobsByStatus:      map[string]int{"queued": 0, "processing": 0, "retryable": 0, "done": 0, "failed": 0},
+	}
+	count := func(tx pgx.Tx, q string, into map[string]int) error {
+		rows, err := tx.Query(ctx, q)
+		if err != nil {
+			return err
+		}
+		var k string
+		var n int
+		_, err = pgx.ForEachRow(rows, []any{&k, &n}, func() error { into[k] = n; return nil })
+		return err
+	}
+	err := pgx.BeginTxFunc(ctx, pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+		if err := count(tx, `SELECT source_type, count(*) FROM clips GROUP BY 1`, st.ClipsBySourceType); err != nil {
+			return fmt.Errorf("counting clips: %w", err)
+		}
+		if err := count(tx, `SELECT status, count(*) FROM transcode_jobs GROUP BY 1`, st.JobsByStatus); err != nil {
+			return fmt.Errorf("counting jobs: %w", err)
+		}
+		return nil
+	})
+	return st, err
+}
