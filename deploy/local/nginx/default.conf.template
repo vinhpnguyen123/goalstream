@@ -1,0 +1,47 @@
+# Local cache in front of MinIO (M8, IMPLEMENTATION_PLAN §13). Only clips/*/hls/* is proxied:
+# everything under a version prefix is immutable, and the only mutable pointer
+# (clips.hls_version) reaches the browser through the uncached API — so 7 days needs no purge.
+# The image's entrypoint substitutes ${CORS_ORIGIN}; nginx's own variables are left alone.
+
+proxy_cache_path /var/cache/nginx/hls levels=1:2 keys_zone=hls:10m max_size=5g inactive=7d use_temp_path=off;
+
+# $uri, never $request or $args: a query string may carry a presign signature (a credential).
+log_format hls '$time_iso8601 $status $upstream_cache_status $body_bytes_sent $uri';
+
+upstream minio {
+    server minio:9000;
+}
+
+server {
+    listen 8081;
+    access_log /dev/stdout hls;
+
+    # /<bucket>/clips/<id>/hls/… — the bucket rides in the path, so the test bucket works too.
+    location ~ ^/[^/]+/clips/[^/]+/hls/. {
+        limit_except GET HEAD { deny all; }
+
+        # $uri drops the query string upstream and from the key: a signature must not fragment
+        # the cache, and MinIO serves hls/ anonymously anyway (deploy/local/hls-read-policy.json).
+        proxy_pass http://minio$uri;
+        proxy_cache hls;
+        proxy_cache_key $uri;
+        proxy_cache_valid 200 7d; # the only rule: a 403/404/5xx is never cached
+        proxy_cache_lock on;      # a cold segment requested by many viewers reaches MinIO once
+        # This file is the whole policy: no upstream header can extend, shorten, split or block it.
+        proxy_ignore_headers Cache-Control Expires X-Accel-Expires Set-Cookie Vary;
+        proxy_hide_header Set-Cookie;
+        # MinIO echoes the request's Origin; cached, that would replay the first viewer's origin.
+        proxy_hide_header Access-Control-Allow-Origin;
+        proxy_hide_header Access-Control-Allow-Credentials;
+        proxy_hide_header Access-Control-Expose-Headers;
+        proxy_hide_header Vary;
+
+        add_header X-Cache-Status $upstream_cache_status always;
+        add_header Access-Control-Allow-Origin ${CORS_ORIGIN} always;
+        add_header Access-Control-Expose-Headers X-Cache-Status always;
+    }
+
+    location / {
+        return 404; # originals and everything else: presigned from MinIO, never through here
+    }
+}

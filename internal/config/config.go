@@ -62,6 +62,9 @@ type APIConfig struct {
 	InviteSecret      string
 	InviteTTL         time.Duration
 	ClientIPHeader    string // set only behind a proxy that overwrites it
+	// HLSBaseURL is the local nginx cache's origin (M8, never prod). Set: /play answers hls with
+	// the unsigned <HLSBaseURL>/<bucket>/<key> instead of presigning. "" = presign.
+	HLSBaseURL string
 }
 
 type S3Config struct {
@@ -130,6 +133,7 @@ func Load(getenv func(string) string) (Config, error) {
 			InviteSecret:      p.str("INVITE_SECRET", ""),
 			InviteTTL:         p.duration("INVITE_TTL", 720*time.Hour),
 			ClientIPHeader:    p.str("CLIENT_IP_HEADER", ""),
+			HLSBaseURL:        strings.TrimSuffix(p.str("HLS_BASE_URL", ""), "/"),
 		},
 		Reco: RecoConfig{
 			ExploreRate:        p.float("EXPLORE_RATE", 0.3),
@@ -158,8 +162,16 @@ func Load(getenv func(string) string) (Config, error) {
 		r.TopK < 1 || r.TopK > 1000 || r.NegPenalty < 0 {
 		p.errs = append(p.errs, errors.New("EXPLORE_RATE must be in [0,1], COLD_START_THRESHOLD ≥ 0, RECO_TOP_K 1–1000, NEG_PENALTY ≥ 0"))
 	}
+	if b := c.API.HLSBaseURL; b != "" {
+		if u, err := url.Parse(b); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Path != "" || u.RawQuery != "" {
+			p.errs = append(p.errs, fmt.Errorf("HLS_BASE_URL must be an origin like http://localhost:8081, got %q", b))
+		}
+	}
 	// Startup guards (CONVENTIONS.md): settings that are only safe on a laptop.
 	if c.AppEnv == "prod" {
+		if c.API.HLSBaseURL != "" {
+			p.errs = append(p.errs, errors.New("HLS_BASE_URL is refused in prod: Phase B is never deployed"))
+		}
 		if err := publicEndpointGuard(c.S3.PublicEndpoint); err != nil {
 			p.errs = append(p.errs, err)
 		}

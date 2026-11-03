@@ -4,9 +4,9 @@ export
 
 .PHONY: up down ps
 
-up: ## start postgres, redis, minio (all on 127.0.0.1), then create the buckets
+up: ## start postgres, redis, minio, nginx (all on 127.0.0.1), then create the buckets
 	docker compose up -d --wait postgres redis
-	docker compose up -d minio
+	docker compose up -d minio nginx
 	docker compose run --rm minio-init
 
 down:
@@ -62,6 +62,14 @@ admin: ## grant is_admin: make admin EMAIL=me@x.com   (REVOKE=1 to demote)
 .PHONY: batch
 batch: ## M7: queue never-migrated mp4 clips and report until done: make batch LIMIT=3   (no LIMIT = all)
 	go run ./cmd/ingest transcode-batch -wait $(if $(LIMIT),-limit $(LIMIT))
+
+.PHONY: cache-stats
+cache-stats: ## M8: nginx cache hits for the app bucket, from its access log: make cache-stats SINCE=10m
+	@docker compose logs --no-log-prefix $(if $(SINCE),--since $(SINCE)) nginx | awk -v b="/$(S3_BUCKET)/" \
+	  'NF == 5 && index($$5, b) == 1 && $$3 != "-" { n++; c[$$3]++; bytes += $$4; if ($$3 == "HIT") hb += $$4 } \
+	  END { if (!n) { print "no cached-path requests"; exit } \
+	        printf "requests %d  hit %d  miss %d  other %d\n", n, c["HIT"], c["MISS"], n - c["HIT"] - c["MISS"]; \
+	        printf "hit rate %.1f%%  byte hit rate %.1f%% of %.1f MB\n", 100*c["HIT"]/n, (bytes ? 100*hb/bytes : 0), bytes/1e6 }'
 
 .PHONY: verify-hls
 verify-hls: ## M7: check every clip still plays (original present, hls playlists/segments, ffprobe); exit 1 on any problem

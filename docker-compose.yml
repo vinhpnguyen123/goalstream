@@ -39,6 +39,17 @@ services:
     ports: ["127.0.0.1:9010:9000", "127.0.0.1:9011:9001"]
     volumes: [miniodata:/data]
 
+  # M8: cache in front of MinIO for clips/*/hls/* only. No volume: recreating the container
+  # (`docker compose up -d --force-recreate nginx`) is a cold cache.
+  nginx:
+    image: nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
+    environment:
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173}
+    ports: ["127.0.0.1:8081:8081"]
+    volumes:
+      - ./deploy/local/nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+    depends_on: [minio]
+
   # One-shot: `make up` runs it after the long-lived services are up.
   minio-init:
     image: cgr.dev/chainguard/minio-client@sha256:0f20f9b9a9a06e2ada88afda965b824fd2d77793083b3b2b10186a9502c836f4
