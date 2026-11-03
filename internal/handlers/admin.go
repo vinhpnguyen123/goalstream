@@ -93,3 +93,13 @@ func (s *Server) clipStatus(w http.ResponseWriter, r *http.Request) {
 		httpx.Internal(w, r, err)
 	}
 }
+
+// adminStats is GET /admin/stats (docs/API.md).
+func (s *Server) adminStats(w http.ResponseWriter, r *http.Request) {
+	st, err := transcode.ReadStats(r.Context(), s.Pool)
+	if err != nil {
+		httpx.Internal(w, r, err)
+		return
+	}
+	httpx.JSON(w, r, http.StatusOK, st)
+}

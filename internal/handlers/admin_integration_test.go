@@ -278,8 +278,10 @@ func TestAdminRoutesHiddenFromNonAdmins(t *testing.T) {
 			t.Errorf("non-admin %s: %d %v", r.path, rec.Code, body)
 		}
 	}
-	if rec, body := e.get(t, status, true); rec.Code != 404 || errType(body) != "not_found" {
-		t.Errorf("non-admin status: %d %v", rec.Code, body)
+	for _, path := range []string{status, "/api/v1/admin/stats"} {
+		if rec, body := e.get(t, path, true); rec.Code != 404 || errType(body) != "not_found" {
+			t.Errorf("non-admin %s: %d %v", path, rec.Code, body)
+		}
 	}
 	var jobs int
 	e.s.Pool.QueryRow(context.Background(), `SELECT count(*) FROM transcode_jobs`).Scan(&jobs)
@@ -298,8 +300,10 @@ func TestAdminRoutesHiddenFromNonAdmins(t *testing.T) {
 			t.Errorf("prod %s: %d %v", r.path, rec.Code, body)
 		}
 	}
-	if rec, body := prod.get(t, status, true); rec.Code != 404 || errType(body) != "not_found" {
-		t.Errorf("prod status: %d %v", rec.Code, body)
+	for _, path := range []string{status, "/api/v1/admin/stats"} {
+		if rec, body := prod.get(t, path, true); rec.Code != 404 || errType(body) != "not_found" {
+			t.Errorf("prod %s: %d %v", path, rec.Code, body)
+		}
 	}
 }
 
@@ -378,6 +382,51 @@ func TestClipStatus(t *testing.T) {
 			t.Errorf("status %s: %d %v", id, code, body)
 		}
 	}
+}
+
+// GET /admin/stats: counts per source_type and per job status, every key present even at zero.
+func TestAdminStats(t *testing.T) {
+	ctx := context.Background()
+	e := setupAPI(t)
+	stats := func() map[string]any {
+		rec, body := e.get(t, "/api/v1/admin/stats", true)
+		if rec.Code != 200 {
+			t.Fatalf("stats: %d %v", rec.Code, body)
+		}
+		return data(body)
+	}
+	want := func(d map[string]any, field string, w map[string]float64) {
+		t.Helper()
+		got, _ := d[field].(map[string]any)
+		if len(got) != len(w) {
+			t.Fatalf("%s = %v, want exactly %v", field, got, w)
+		}
+		for k, n := range w {
+			if got[k] != n {
+				t.Fatalf("%s[%s] = %v, want %v (all: %v)", field, k, got[k], n, got)
+			}
+		}
+	}
+
+	// Empty catalogue: zeros, not missing keys.
+	d := stats()
+	want(d, "clips_by_source_type", map[string]float64{"mp4": 0, "hls": 0})
+	want(d, "jobs_by_status", map[string]float64{"queued": 0, "processing": 0, "retryable": 0, "done": 0, "failed": 0})
+
+	// 3 clips, one hls; jobs: 2 done (two clips), 1 failed, 1 queued.
+	a := e.seedClip(t, "a", time.Now(), []byte("x"))
+	b := e.seedClip(t, "b", time.Now(), []byte("x"))
+	e.seedClip(t, "c", time.Now(), []byte("x"))
+	if _, err := e.s.Pool.Exec(ctx, `UPDATE clips SET source_type = 'hls', hls_version = $2 WHERE id = $1`, a, e.version(t, a)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.s.Pool.Exec(ctx, `
+		INSERT INTO transcode_jobs (clip_id, status) VALUES ($1, 'done'), ($1, 'failed'), ($2, 'done'), ($2, 'queued')`, a, b); err != nil {
+		t.Fatal(err)
+	}
+	d = stats()
+	want(d, "clips_by_source_type", map[string]float64{"mp4": 2, "hls": 1})
+	want(d, "jobs_by_status", map[string]float64{"queued": 1, "processing": 0, "retryable": 0, "done": 2, "failed": 1})
 }
 
 // GET /clips carries a presigned thumbnail_url once a transcode committed a thumbnail, and

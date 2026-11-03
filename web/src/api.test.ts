@@ -105,4 +105,17 @@ describe('api', () => {
     expect(seen?.init.method).toBe('PUT')
     expect(seen?.init.body).toBe('{"response":"okay"}')
   })
+
+  it('adminStats is null on 404 (not an admin, or prod) and throws on anything else', async () => {
+    const stats = { clips_by_source_type: { mp4: 2, hls: 1 }, jobs_by_status: { done: 1 } }
+    let reply = () => json(200, { data: stats })
+    vi.stubGlobal('fetch', async () => reply())
+    const { adminStats } = await import('./api')
+
+    await expect(adminStats()).resolves.toEqual(stats)
+    reply = () => json(404, { error: { type: 'not_found', message: 'no' } })
+    await expect(adminStats()).resolves.toBeNull()
+    reply = () => json(500, { error: { type: 'internal_error', message: 'no' } })
+    await expect(adminStats()).rejects.toMatchObject({ status: 500 })
+  })
 })

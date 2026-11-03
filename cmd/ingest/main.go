@@ -7,6 +7,14 @@
 //	ingest reembed   rebuild every embedding (after a vocab or layout change)
 //	ingest admin -email <email> [-revoke]
 //	                 grant (or revoke) users.is_admin — the only way it changes
+//	ingest transcode-batch [-limit N] [-wait]
+//	                 queue a transcode for the next N mp4 clips (0 = all) that were never migrated
+//	                 and have no active job; -wait reports until every job is done or failed.
+//	                 The worker (make worker) does the transcoding.
+//	ingest verify-hls
+//	                 check every clip still plays: original.mp4 present; for hls clips the live
+//	                 version's playlists and segment counts, and ffprobe of the master. Exit 1 on
+//	                 any problem.
 package main
 
 import (
@@ -18,9 +26,12 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/vinhpnguyen123/goalstream/internal/auth"
 	"github.com/vinhpnguyen123/goalstream/internal/config"
@@ -28,6 +39,7 @@ import (
 	"github.com/vinhpnguyen123/goalstream/internal/ingest"
 	"github.com/vinhpnguyen123/goalstream/internal/recommend"
 	"github.com/vinhpnguyen123/goalstream/internal/storage"
+	"github.com/vinhpnguyen123/goalstream/internal/transcode"
 )
 
 func main() {
@@ -42,7 +54,7 @@ func main() {
 
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: ingest migrate|run|tags|reembed|admin")
+		return fmt.Errorf("usage: ingest migrate|run|tags|reembed|admin|transcode-batch|verify-hls")
 	}
 	cfg, err := config.Load(os.Getenv)
 	if err != nil {
@@ -57,6 +69,10 @@ func run(ctx context.Context, args []string) error {
 		return rebuild(ctx, cfg, args[0])
 	case "admin":
 		return setAdmin(ctx, cfg, args[1:])
+	case "transcode-batch":
+		return transcodeBatch(ctx, cfg, args[1:])
+	case "verify-hls":
+		return verifyHLS(ctx, cfg)
 	default:
 		return fmt.Errorf("unknown subcommand %q", args[0])
 	}
@@ -167,5 +183,111 @@ func setAdmin(ctx context.Context, cfg config.Config, args []string) error {
 		state = map[bool]string{false: "was already admin", true: "was already not admin"}[*revoke]
 	}
 	fmt.Println(email, state)
+	return nil
+}
+
+// transcodeBatch is `make batch [LIMIT=N]`, the catalogue migration (M7): queue the next N
+// never-migrated mp4 clips, then with -wait poll until every job ends and print the batch's
+// success rates. Re-running it picks up only what is left, so "a few, verify, then the rest"
+// is two runs. Ctrl-C stops the waiting, not the jobs — the worker keeps going.
+func transcodeBatch(ctx context.Context, cfg config.Config, args []string) error {
+	fs := flag.NewFlagSet("transcode-batch", flag.ContinueOnError)
+	limit := fs.Int("limit", 0, "how many clips to queue (0 = all pending)")
+	waitFor := fs.Bool("wait", false, "report until every queued job is done or failed")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	pool, err := db.Connect(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	ropt, err := redis.ParseURL(cfg.RedisURL)
+	if err != nil {
+		return fmt.Errorf("config: REDIS_URL: %w", err)
+	}
+	rdb := redis.NewClient(ropt)
+	defer rdb.Close()
+
+	clips, err := transcode.Pending(ctx, pool, *limit)
+	if err != nil {
+		return err
+	}
+	start := time.Now()
+	jobs, err := transcode.Enqueue(ctx, pool, transcode.NewQueue(rdb), clips, slog.Default())
+	fmt.Printf("queued %d jobs (%d clips pending)\n", len(jobs), len(clips))
+	if err != nil || !*waitFor || len(jobs) == 0 {
+		return err
+	}
+
+	fmt.Println("waiting — the worker (make worker) must be running; Ctrl-C stops waiting, not the jobs")
+	tick := time.NewTicker(5 * time.Second)
+	defer tick.Stop()
+	last := ""
+	for {
+		r, err := transcode.Progress(ctx, pool, jobs)
+		if err != nil {
+			return err
+		}
+		if line := fmt.Sprintf("active %d · done %d · failed %d", r.Active, r.Done, r.Failed); line != last {
+			fmt.Printf("%s  %s\n", time.Since(start).Round(time.Second), line)
+			last = line
+		}
+		if r.Active == 0 {
+			printReport(r, time.Since(start))
+			// Non-zero exit on any failure, so `make batch && make verify-hls` stops: a failed
+			// clip is still mp4, and the migration is not done until none is.
+			if r.Failed > 0 {
+				return fmt.Errorf("%d of %d jobs failed", r.Failed, r.Done+r.Failed)
+			}
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("stopped waiting: %w", ctx.Err())
+		case <-tick.C:
+		}
+	}
+}
+
+// printReport prints both success rates (plan §15 M7 Q4): job-level hides a failure that a
+// retry fixed, so first-try is reported next to it.
+func printReport(r transcode.Report, took time.Duration) {
+	n := r.Done + r.Failed
+	pct := func(k int) float64 { return 100 * float64(k) / float64(n) }
+	fmt.Printf("\nbatch of %d jobs in %s\n", n, took.Round(time.Second))
+	fmt.Printf("  success      %d/%d = %.1f%%\n", r.Done, n, pct(r.Done))
+	fmt.Printf("  first try    %d/%d = %.1f%%\n", r.FirstTry, n, pct(r.FirstTry))
+	var hist []string
+	for a := 0; len(hist) < len(r.Attempts); a++ { // 0: cancelled before any claim
+		if k, ok := r.Attempts[a]; ok {
+			hist = append(hist, fmt.Sprintf("%d×%d", k, a))
+		}
+	}
+	fmt.Printf("  attempts     %s  (jobs × attempts)\n", strings.Join(hist, " · "))
+	for reason, k := range r.Reasons {
+		fmt.Printf("  failed       %d × %s\n", k, reason)
+	}
+}
+
+// verifyHLS is `make verify-hls`: the evidence for M7's "every clip plays, originals still
+// archived". One line per problem, then a summary; exit 1 if anything is wrong.
+func verifyHLS(ctx context.Context, cfg config.Config) error {
+	pool, err := db.Connect(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	r, err := transcode.Verify(ctx, pool, storage.New(cfg.S3))
+	if err != nil {
+		return err
+	}
+	for _, p := range r.Problems {
+		fmt.Printf("%s  %s\n", p.ClipID, p.What)
+	}
+	fmt.Printf("checked %d clips (mp4 %d · hls %d): %d problems\n", r.MP4+r.HLS, r.MP4, r.HLS, len(r.Problems))
+	if len(r.Problems) > 0 {
+		return fmt.Errorf("%d problems", len(r.Problems))
+	}
 	return nil
 }

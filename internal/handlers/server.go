@@ -83,7 +83,7 @@ func (s *Server) Routes() http.Handler {
 				r.With(middleware.RateLimit(s.Redis, middleware.RulePlay, middleware.ByUser)).
 					Get("/stream/{id}", s.streamClip)
 			}
-			// Admin: transcode, rollback (M5), status (M6). Never mounted in prod — production runs no
+			// Admin: transcode, rollback (M5), status (M6), stats (M7). Never mounted in prod — production runs no
 			// worker and Phase B is never deployed (decision 14), so a job there would only
 			// ever sit queued. Per-user limit (step 7), then the admin check (step 8).
 			if s.Cfg.AppEnv != "prod" {
@@ -93,6 +93,7 @@ func (s *Server) Routes() http.Handler {
 					r.Post("/admin/clips/{id}/transcode", s.createJob)
 					r.Post("/admin/clips/{id}/delivery", s.setDelivery)
 					r.Get("/admin/clips/{id}/status", s.clipStatus)
+					r.Get("/admin/stats", s.adminStats)
 				})
 			}
 		})

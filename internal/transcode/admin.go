@@ -18,6 +18,8 @@ var (
 	ErrClipNotFound = errors.New("clip not found")
 	// ErrVersionNotFound: the rollback target has no renditions rows — it never committed.
 	ErrVersionNotFound = errors.New("version not found")
+	// ErrNotPending: a batch job for a clip that is no longer an unmigrated mp4 (Pending).
+	ErrNotPending = errors.New("clip no longer pending migration")
 )
 
 // ActiveJobError: the clip already has a queued, processing or retryable job.
@@ -30,6 +32,20 @@ func (e *ActiveJobError) Error() string { return "job " + e.JobID + " is already
 // the guard: two active jobs would race the hls_version pointer. It does not push: the caller
 // pushes after this returns, so the row exists first (Postgres before Redis).
 func CreateJob(ctx context.Context, pool *pgxpool.Pool, clipID string) (string, error) {
+	return createJob(ctx, pool, clipID, false)
+}
+
+// createJob is CreateJob; onlyPending (the batch) also requires the clip to still be an
+// unmigrated mp4 when the job is created, not just when Pending listed it — otherwise a clip
+// migrated (or migrated and rolled back) in between is re-transcoded, undoing the rollback.
+//
+// The re-check comes AFTER the INSERT, on purpose. Once the INSERT succeeds no other job is
+// active for the clip (the unique index), and if a fenced commit was moving the clip's job to
+// done, the INSERT waited for that commit to finish — so this statement's snapshot already sees
+// its pointer. Rollback and re-promotion take lockClipJobs, which this tx holds. Nothing can
+// change the clip's delivery between the re-check and our COMMIT. Checked before the INSERT, a
+// commit landing in between would be missed.
+func createJob(ctx context.Context, pool *pgxpool.Pool, clipID string, onlyPending bool) (string, error) {
 	var jobID string
 	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		if err := lockClipJobs(ctx, tx, clipID); err != nil {
@@ -39,6 +55,16 @@ func CreateJob(ctx context.Context, pool *pgxpool.Pool, clipID string) (string, 
 		if err != nil {
 			return err
 		}
+		if onlyPending {
+			var pending bool
+			if err := tx.QueryRow(ctx, `SELECT source_type = 'mp4' AND hls_version IS NULL FROM clips WHERE id = $1`,
+				clipID).Scan(&pending); err != nil {
+				return fmt.Errorf("re-checking clip %s: %w", clipID, err)
+			}
+			if !pending {
+				return ErrNotPending // rolls the INSERT back
+			}
+		}
 		return audit.Write(ctx, tx, audit.Entry{EntityType: "job", EntityID: jobID, Action: "job_created",
 			ActorType: "admin", Metadata: map[string]any{"clip_id": clipID, "source": "admin"}})
 	})
@@ -46,6 +72,8 @@ func CreateJob(ctx context.Context, pool *pgxpool.Pool, clipID string) (string, 
 	switch {
 	case err == nil:
 		return jobID, nil
+	case errors.Is(err, ErrNotPending):
+		return "", err
 	case errors.As(err, &pg) && pg.Code == "23503": // transcode_jobs.clip_id → clips
 		return "", ErrClipNotFound
 	case errors.As(err, &pg) && pg.Code == "23505" && pg.ConstraintName == "jobs_one_active_per_clip":
@@ -243,6 +271,42 @@ func Status(ctx context.Context, pool *pgxpool.Pool, clipID string) (ClipStatus,
 			last.Renditions = append(last.Renditions, r)
 		}
 		return rows.Err()
+	})
+	return st, err
+}
+
+// Stats is GET /admin/stats: the migration's progress at a glance. Every key is present, zero
+// when nothing has it, so the caller never has to tell "none" from "missing".
+type Stats struct {
+	ClipsBySourceType map[string]int `json:"clips_by_source_type"`
+	JobsByStatus      map[string]int `json:"jobs_by_status"`
+}
+
+// ReadStats counts clips per source_type and jobs per status in one read-only snapshot, so a
+// commit landing between the two counts cannot show a clip as hls while its job is still active.
+func ReadStats(ctx context.Context, pool *pgxpool.Pool) (Stats, error) {
+	st := Stats{
+		ClipsBySourceType: map[string]int{"mp4": 0, "hls": 0},
+		JobsByStatus:      map[string]int{"queued": 0, "processing": 0, "retryable": 0, "done": 0, "failed": 0},
+	}
+	count := func(tx pgx.Tx, q string, into map[string]int) error {
+		rows, err := tx.Query(ctx, q)
+		if err != nil {
+			return err
+		}
+		var k string
+		var n int
+		_, err = pgx.ForEachRow(rows, []any{&k, &n}, func() error { into[k] = n; return nil })
+		return err
+	}
+	err := pgx.BeginTxFunc(ctx, pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+		if err := count(tx, `SELECT source_type, count(*) FROM clips GROUP BY 1`, st.ClipsBySourceType); err != nil {
+			return fmt.Errorf("counting clips: %w", err)
+		}
+		if err := count(tx, `SELECT status, count(*) FROM transcode_jobs GROUP BY 1`, st.JobsByStatus); err != nil {
+			return fmt.Errorf("counting jobs: %w", err)
+		}
+		return nil
 	})
 	return st, err
 }

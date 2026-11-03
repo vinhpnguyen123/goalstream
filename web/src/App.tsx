@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { ApiError, logout, probe, signedIn } from './api'
+import AdminBadge from './AdminBadge'
 import AuthScreen from './AuthScreen'
 import InviteScreen from './InviteScreen'
 import Session from './Session'
@@ -45,13 +46,16 @@ export default function App() {
       )}
       {gate === 'in' && (
         <>
-          {/* AUTH_MODE=dev issues no token, so there is nothing to sign out of */}
-          {signedIn() && (
-            <header className="flex items-center justify-end gap-3 px-4 pt-2">
-              {signOutError && <p role="alert" className="text-sm text-red-400">{signOutError}</p>}
-              <button onClick={signOut} className="py-2 text-sm text-neutral-400">Sign out</button>
-            </header>
-          )}
+          <header className="flex items-center justify-end gap-3 px-4 pt-2">
+            <AdminBadge />
+            {/* AUTH_MODE=dev issues no token, so there is nothing to sign out of */}
+            {signedIn() && (
+              <>
+                {signOutError && <p role="alert" className="text-sm text-red-400">{signOutError}</p>}
+                <button onClick={signOut} className="py-2 text-sm text-neutral-400">Sign out</button>
+              </>
+            )}
+          </header>
           <Session onGateLost={() => setGate('invite')} onSignedOut={() => setGate('login')} />
         </>
       )}

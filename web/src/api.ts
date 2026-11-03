@@ -127,3 +127,16 @@ export const putRating = (clipId: string, response: Rating) =>
   api<{ changed: boolean; previous?: Rating | null }>(`/ratings/${clipId}`, {
     method: 'PUT', body: JSON.stringify({ response }),
   })
+
+export type Stats = { clips_by_source_type: { mp4: number; hls: number }; jobs_by_status: Record<string, number> }
+
+// adminStats is null for anyone who is not an admin, and in production: both answer 404, by
+// design indistinguishable (docs/API.md). Any other error still throws.
+export async function adminStats(): Promise<Stats | null> {
+  try {
+    return await api<Stats>('/admin/stats')
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return null
+    throw err
+  }
+}
