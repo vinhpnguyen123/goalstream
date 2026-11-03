@@ -529,3 +529,90 @@ make worker JOB=<job_id>    # still there: one job, no Redis
 | A queue namespace setting: tests that spawn the real worker isolate it in Redis database 15 | two environments share one Redis |
 | Concurrency inside one worker: one job at a time per process | the catalogue is large enough that one CPU-bound worker cannot keep up — run more processes first |
 | Kafka, or any broker with replay | several independent consumers or sustained high throughput (ARCHITECTURE.md) |
+
+### M7 — migrate the catalogue (`m7-catalog-migrated`)
+
+**What it does.** Every local clip now plays as HLS. The whole catalogue went through the M6
+pipeline in two runs, "a few, verify, then the rest", while the app kept serving: a clip switches
+from MP4 to HLS only at its own fenced commit, and `original.mp4` stays behind it as the fallback
+and rollback target. An admin badge in the web header shows the progress (`mp4 N · hls N`), and a
+verifier proves afterwards that every clip can still be played. Local only, like all of Phase B.
+
+**How it works.**
+
+- *Progress* — `GET /admin/stats` (`transcode.ReadStats`): clips per `source_type` and jobs per
+  status, every key present even at 0, both counts from one read-only snapshot so a commit landing
+  between them cannot show a clip as HLS while its job still looks active. The web badge calls it
+  once per page load and hides on 404 — non-admins and production get 404 — so no `/me` endpoint
+  was needed.
+- *The batch* — `make batch [LIMIT=N]` (`ingest transcode-batch -wait`):
+  - `Pending` lists the clips still to migrate, oldest first: MP4, **never** migrated
+    (`hls_version IS NULL`) and no active job. A clip an admin rolled back to MP4 keeps its version
+    and is left alone; a clip whose last job failed is listed again, so re-running retries it.
+    Re-running is also how "the rest" works: it only ever picks up what is left.
+  - `Enqueue` creates and pushes one job per clip with the same code as the admin endpoint — the
+    row before the push. Because `Pending` is only a snapshot, each job's transaction re-checks the
+    clip **after** inserting the job: the insert waits out a fenced commit in flight, and rollback
+    takes the same per-clip lock, so nothing can change the clip between the check and the commit.
+  - `-wait` polls the jobs every 5 s and prints both success rates. Any failed job → exit 1, so
+    `make batch && make verify-hls` stops.
+- *The verifier* — `make verify-hls` (`transcode.Verify`), for every clip:
+  - `original.mp4` exists;
+  - for HLS clips, the live version has its master and one playlist per rung, every segment each
+    playlist **names** exists, and each playlist names as many segments as the commit recorded;
+  - `ffprobe` opens the presigned master the way a player does (variants fetched unsigned, as
+    hls.js does) and must see one video stream per rung, at the rung's height.
+
+  ffprobe's errors echo the URL it was given, so query strings are redacted before printing.
+
+**The measured result.** One worker on a MacBook (battery, lid open, `caffeinate`), 78 clips:
+
+| Run | Jobs | Wall time | Success | First try |
+|---|---|---|---|---|
+| `make batch LIMIT=10` | 10 | 4 m 40 s | 10/10 | 10/10 |
+| `make batch` (the rest) | 68 | 28 m 31 s | 68/68 | 68/68 |
+| **Total** | **78** | **33 m 11 s** | **100 %** | **100 %** |
+
+Per job (claim → commit): p50 25.1 s, p95 29.6 s, max 39 s. After the run: `mp4 0 · hls 88`,
+264 renditions (3 rungs per clip), `make verify-hls` → 88 clips, 0 problems.
+
+100 % is honest but narrow: every input was a 720p25 mezzanine that my own ingest had already cut
+and passed through its QC gate, so the pipeline was only ever fed files it was built for. It says
+nothing about arbitrary uploads; the failure paths are covered by the M6 crash tests, not by this
+run.
+
+**Bugs the adversarial reviews found, and the tests that now pin them.**
+
+| Bug | Fix |
+|---|---|
+| `Pending` is a snapshot and `CreateJob` allows re-transcodes, so a clip migrated — or migrated *and rolled back* — between the listing and its turn got a job, undoing the rollback | The batch's job transaction re-checks the clip after the insert. Tested with the commit held open during the insert; moving the check before the insert makes that test fail |
+| The batch exited 0 even when every job failed | Report first, then exit 1 on any failure |
+| The verifier counted segment files in the folder: a renamed later segment kept the count right, and ffprobe only reads the first one, so a clip that stalls mid-playback passed | Read each rendition playlist; every segment it names must exist |
+
+Found by a test: when a variant playlist is missing, ffprobe silently drops that stream and still
+exits 0. An exit-code check would have passed it; comparing the heights it sees with the rungs
+does not.
+
+**Run it locally.**
+
+```bash
+make up && make api && make fe      # the badge shows mp4 N · hls N for an admin
+caffeinate -i make worker           # keep the laptop awake: a sleep can make the reaper burn attempts
+caffeinate -i make batch LIMIT=10   # a few; exit 1 if any failed
+make verify-hls                     # every clip still plays; exit 1 on any problem
+caffeinate -i make batch            # the rest
+make verify-hls
+```
+
+**What I learned.** _(to write in my own words)_
+
+**What I chose not to build — and when that choice would be wrong.**
+
+| Not built | Would be wrong when |
+|---|---|
+| A batch HTTP endpoint or an admin "migrate all" button: the batch is a CLI that reuses `CreateJob` | someone other than an engineer runs migrations, or the API must be the only write path |
+| More than one worker: 78 clips took 33 minutes | the catalogue is in the thousands (≈ 7 h per 1000 clips at 25 s each) — run N worker processes first; the claim already makes that safe |
+| A live-updating badge: fetched once per page load | the web UI becomes the operator's console during a migration |
+| Decoding every segment in the verifier: it checks that every named segment exists and opens the first of each variant | segments can be corrupted in storage after being written (bit rot, partial overwrite) — then store checksums at commit, or decode each variant in full |
+| Retrying rolled-back clips automatically: they stay MP4 until an admin re-transcodes them | rollbacks become routine rather than a deliberate decision |
+| Cleaning up old and orphaned versions (decision D9): they accumulate | storage cost matters — then a reaper for prefixes that are neither live nor a rollback target |
