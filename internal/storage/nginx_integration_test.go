@@ -144,7 +144,8 @@ func TestNginxInvite(t *testing.T) {
 	if err := os.WriteFile(f, []byte("segment"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := storage.New(cfg.S3).PutFile(ctx, seg, f, "video/mp2t", ""); err != nil {
+	// The header the worker uploads with (transcode.immutable): public, which nginx must not pass on.
+	if err := storage.New(cfg.S3).PutFile(ctx, seg, f, "video/mp2t", "public, max-age=604800, immutable"); err != nil {
 		t.Fatal(err)
 	}
 	marker := uuid.NewString() // in the query string; must never reach the log
@@ -181,6 +182,17 @@ func TestNginxInvite(t *testing.T) {
 	} else if h.Get("Access-Control-Allow-Credentials") != "true" {
 		t.Errorf("Access-Control-Allow-Credentials = %q, want true (hls.js sends credentials)", h.Get("Access-Control-Allow-Credentials"))
 	}
+	// Only the viewer's own browser may keep it: no shared cache, which would serve it without
+	// the cookie check. Asserted on the MISS and on the HIT (nginx caches MinIO's headers).
+	for i := range 2 {
+		_, cache, h := get("gs_invite=" + valid)
+		if cc := h.Values("Cache-Control"); len(cc) != 1 || cc[0] != "private, max-age=604800, immutable" {
+			t.Errorf("200 %s: Cache-Control %q, want exactly private, max-age=604800, immutable", cache, cc)
+		}
+		if h.Get("Expires") != "" {
+			t.Errorf("200 %s (%d): Expires %q passed on", cache, i, h.Get("Expires"))
+		}
+	}
 	for name, cookie := range map[string]string{
 		"no cookie":         "",
 		"empty":             "gs_invite=",
@@ -198,6 +210,8 @@ func TestNginxInvite(t *testing.T) {
 			t.Errorf("%s: %d %q, want 403 before the cache", name, code, cache)
 		} else if h.Get("Access-Control-Allow-Origin") == "" {
 			t.Errorf("%s: 403 without CORS headers — hls.js could not read the status", name)
+		} else if strings.Contains(h.Get("Cache-Control"), "max-age") {
+			t.Errorf("%s: 403 carries Cache-Control %q", name, h.Get("Cache-Control"))
 		}
 	}
 	// Among other cookies, as a browser sends it.

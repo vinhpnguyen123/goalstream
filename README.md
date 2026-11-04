@@ -751,6 +751,13 @@ works without the other.
   from its environment (`env` in `nginx.conf`), never from a rendered config. The cookie is
   removed before the request reaches MinIO. The access log records `$uri` only: no query string,
   no cookie.
+- *Only the viewer's browser may keep a copy.* The worker uploads HLS objects as `public,
+  max-age=604800, immutable`; nginx replaces that with `private, …`. A shared cache between the
+  viewer and nginx (a proxy, a CDN) may no longer store a response that needs the invite and
+  hand it out without the check. The viewer's own browser still keeps segments, so a replay does
+  not download them again. A 403 never carries a cache header. Revoking a cookie stops every new
+  byte; it cannot recall bytes a viewer already received. No cache header can, so `no-store`
+  would only cost re-downloads. (A review flagged the `public`.)
 - *The cache key is still `$uri`.* A per-viewer token in the URL would split the cache into one
   copy per viewer. A cookie leaves the key alone, so a second viewer still gets a HIT.
 - *`make verify-hls`* goes through nginx with a cookie it signs itself, the same path a player

@@ -52,6 +52,14 @@ server {
         proxy_hide_header Access-Control-Allow-Credentials;
         proxy_hide_header Access-Control-Expose-Headers;
         proxy_hide_header Vary;
+        # MinIO stores "public, max-age=604800, immutable" (the worker's upload header). Public
+        # lets a shared cache between viewer and nginx store a response that needs the invite and
+        # serve it without the check (M9). private keeps the viewer's own browser cache — the
+        # bytes are already theirs — and forbids every shared one. No `always`: a 403 is never
+        # cacheable.
+        proxy_hide_header Cache-Control;
+        proxy_hide_header Expires;
+        add_header Cache-Control "private, max-age=604800, immutable";
 
         add_header X-Cache-Status $upstream_cache_status always;
         add_header Access-Control-Allow-Origin ${CORS_ORIGIN} always;
