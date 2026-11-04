@@ -5,6 +5,7 @@ package transcode
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	"github.com/vinhpnguyen123/goalstream/internal/storage"
+	"github.com/vinhpnguyen123/goalstream/internal/storage/storagetest"
 )
 
 // Verify on a catalogue with one clip broken each way: only the broken clips are reported, each
@@ -85,7 +87,11 @@ func TestVerify(t *testing.T) {
 	plainMP4, _ := e.clip(t, "clip_576p.mp4")
 	noOriginal, _ := e.clip(t, "")
 
-	r, err := Verify(ctx, e.pool, e.w.Store)
+	hlsBase := os.Getenv("HLS_BASE_URL")
+	if hlsBase == "" {
+		t.Fatal("HLS_BASE_URL must point at the local nginx (make up)")
+	}
+	r, err := Verify(ctx, e.pool, e.w.Store, hlsBase+"/"+e.cfg.S3.Bucket, storagetest.InviteCookie(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,6 +103,9 @@ func TestVerify(t *testing.T) {
 		got[p.ClipID] = append(got[p.ClipID], p.What)
 		if strings.Contains(p.What, "X-Amz") || strings.Contains(p.What, "Signature") {
 			t.Errorf("problem line leaks a presigned URL: %s", p.What)
+		}
+		if strings.Contains(p.What, "gs_invite") {
+			t.Errorf("problem line leaks the invite cookie: %s", p.What)
 		}
 	}
 	for _, id := range []string{good, plainMP4} {

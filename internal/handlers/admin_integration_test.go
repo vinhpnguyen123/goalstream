@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/vinhpnguyen123/goalstream/internal/storage/storagetest"
 	"github.com/vinhpnguyen123/goalstream/internal/transcode"
 )
 
@@ -75,6 +76,7 @@ func TestCreateJob(t *testing.T) {
 		t.Fatalf("transcode: %d %v", rec.Code, body)
 	}
 	job := data(body)["job_id"].(string)
+	firstReqID := rec.Header().Get("X-Request-ID")
 	// Postgres first, then the push: the queue holds exactly this job.
 	if q, err := e.s.Redis.LRange(context.Background(), e.s.Queue.NS+":queue", 0, -1).Result(); err != nil || len(q) != 1 || q[0] != job {
 		t.Fatalf("queue = %v (%v), want [%s]", q, err, job)
@@ -90,10 +92,17 @@ func TestCreateJob(t *testing.T) {
 			t.Errorf("transcode %s: %d %v", id, rec.Code, body)
 		}
 	}
+	// The audit row joins to the request that made it (X-Request-ID, logs) and to its admin:
+	// request ID → job_created → job id → the worker's log lines (M9).
 	var audits int
-	e.s.Pool.QueryRow(context.Background(), `SELECT count(*) FROM audit_log WHERE action = 'job_created' AND entity_id = $1`, job).Scan(&audits)
+	var reqID, actor *string
+	e.s.Pool.QueryRow(context.Background(), `SELECT count(*), max(request_id), max(actor_user_id::text) FROM audit_log
+		WHERE action = 'job_created' AND entity_id = $1`, job).Scan(&audits, &reqID, &actor)
 	if audits != 1 {
 		t.Fatalf("job_created audited %d times", audits)
+	}
+	if reqID == nil || *reqID != firstReqID || actor == nil || *actor != e.s.DevUserID {
+		t.Errorf("job_created request_id %v actor %v, want %s and the admin %s", reqID, actor, firstReqID, e.s.DevUserID)
 	}
 
 	// A finished (failed) job does not block a new one: retrying a clip is a NEW job.
@@ -506,9 +515,15 @@ func TestPlayThroughCache(t *testing.T) {
 		}
 		return d["type"].(string), u
 	}
+	cookie := storagetest.InviteCookie(t) // M9: what the gate set in the browser
 	fetch := func(u *url.URL) (int, string) {
 		t.Helper()
-		res, err := http.Get(u.String())
+		req, err := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Cookie", cookie)
+		res, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}

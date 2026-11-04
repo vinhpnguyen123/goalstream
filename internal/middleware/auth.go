@@ -8,7 +8,7 @@ import (
 	"github.com/vinhpnguyen123/goalstream/internal/httpx"
 )
 
-// Auth resolves the caller (docs/API.md step 6). "jwt" verifies Authorization: Bearer with
+// Auth resolves the caller (docs/API.md step 7). "jwt" verifies Authorization: Bearer with
 // signer; "dev" injects the local dev user (config refuses it in prod); "closed" — and
 // anything misconfigured — turns every user route away.
 func Auth(mode, devUserID string, signer *auth.Signer) func(http.Handler) http.Handler {
@@ -33,7 +33,7 @@ func Auth(mode, devUserID string, signer *auth.Signer) func(http.Handler) http.H
 	}
 }
 
-// ByUser keys a per-user rule (step 7). It only runs after Auth, which guarantees a user.
+// ByUser keys a per-user rule (step 8). It only runs after Auth, which guarantees a user.
 func ByUser(r *http.Request) string {
 	id, _ := httpx.UserID(r.Context())
 	return id

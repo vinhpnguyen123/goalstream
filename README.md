@@ -715,3 +715,104 @@ docker compose up -d --force-recreate nginx   # cold cache
 | Cache warming or pre-fetching the next rung | first-viewer latency matters, e.g. a new clip expected to go viral |
 | A persistent cache volume: recreating the container empties it | a restart must not cost a cold cache — on a laptop it is a feature for measuring |
 | Access control: anyone on this machine can read `hls/` | that is M9 — the invite cookie, checked by nginx before the cache |
+
+### M9 — segment access control and hardening, local (`m9-hardening`)
+
+**What it does.** Since M5, anything on this machine could read every HLS playlist and segment
+without a credential: hls.js resolves renditions and segments relative to the master, so those
+requests carry no signature, and MinIO served `clips/*/hls/*` anonymously. Now a segment is
+served only to a request that carries a valid invite cookie, the same `gs_invite` the API's gate
+sets. Like M5–M8 it runs on localhost only and is shown by screencast. Phase B is never deployed.
+
+**How it works.** The cookie check and the storage restriction depend on each other. Neither
+works without the other.
+
+- *nginx checks the cookie* (`deploy/local/nginx/invite.js`, njs). It applies the same rules as
+  the API's `auth.VerifyInvite`: the value is `base64url(id|exp|HMAC-SHA256(INVITE_SECRET,
+  id|exp))`. The MAC is compared in constant time, `exp` must be in the future, and `id` must
+  still be in `INVITE_CODES`, so removing an id revokes every cookie it issued. Every failure is
+  the same 403.
+- *The check runs before the cache.* It is a `return 403` in nginx's rewrite phase, which runs
+  before `proxy_cache` is consulted. A segment that is already cached is still refused to a
+  request without the cookie.
+- *MinIO serves `hls/` anonymously only to nginx.* The local bucket policy gains an
+  `aws:SourceIp` condition naming nginx's fixed address on a fixed Docker subnet
+  (`172.30.0.10`). A bare segment URL sent straight to MinIO is 403, so the cookie check cannot
+  be bypassed by skipping nginx. Originals stay private and presigned, exactly as before.
+- *The browser sends the cookie.* Cookies ignore ports, so `gs_invite`, set through the app on
+  `localhost:5173`, is also sent to nginx on `localhost:8081`. The two are the same site, so
+  `SameSite=Lax` is satisfied. They are different origins, though, so hls.js must send
+  credentials (`xhrSetup` → `withCredentials`) and nginx answers with the exact origin plus
+  `Access-Control-Allow-Credentials: true`, never `*`. Safari's native HLS sends same-site
+  cookies without CORS. Without `withCredentials`, every HLS request is 403 and every clip falls
+  back to MP4. The Go tests attach the cookie themselves and could not see this; a review caught
+  it, and a browser check confirmed it.
+- *Secrets stay out of config files and logs.* nginx reads `INVITE_SECRET` and `INVITE_CODES`
+  from its environment (`env` in `nginx.conf`), never from a rendered config. The cookie is
+  removed before the request reaches MinIO. The access log records `$uri` only: no query string,
+  no cookie.
+- *Only the viewer's browser may keep a copy.* The worker uploads HLS objects as `public,
+  max-age=604800, immutable`; nginx replaces that with `private, …`. A shared cache between the
+  viewer and nginx (a proxy, a CDN) may no longer store a response that needs the invite and
+  hand it out without the check. The viewer's own browser still keeps segments, so a replay does
+  not download them again. A 403 never carries a cache header. Revoking a cookie stops every new
+  byte; it cannot recall bytes a viewer already received. No cache header can, so `no-store`
+  would only cost re-downloads. (A review flagged the `public`.)
+- *The cache key is still `$uri`.* A per-viewer token in the URL would split the cache into one
+  copy per viewer. A cookie leaves the key alone, so a second viewer still gets a HIT.
+- *`make verify-hls`* goes through nginx with a cookie it signs itself, the same path a player
+  takes.
+
+**What a URL alone grants, by milestone.**
+
+| Milestone | URL | Grants |
+|---|---|---|
+| M1–M4.5 | presigned `original.mp4` | that one clip, for 15 minutes, with no gate and no login (accepted) |
+| M5–M8 | `clips/<id>/hls/<version>/…` | readable forever by anything on this machine |
+| M9 | the same, through nginx or straight to MinIO | nothing without a valid invite cookie: 403, even when cached |
+
+**Accepted gap, verified.** MinIO takes the `aws:SourceIp` it checks from `X-Forwarded-For`,
+`X-Real-IP` or `Forwarded` when a request carries one. So a process on this machine that sends
+one naming nginx's address gets past the policy. I accepted it because MinIO is bound to
+127.0.0.1, anything that can send that request can also read the MinIO data volume through
+Docker, and a browser cannot set those headers on a media request. A test pins the behaviour,
+so a MinIO upgrade that changes it will be noticed. A related fix: nginx now blanks those three
+headers on its way to MinIO. Otherwise a client's own `X-Forwarded-For` would replace nginx's
+address and turn a cold read into a 403.
+
+**Request IDs, end to end.**
+
+- Every API request now writes one log line: `request_id`, method, route pattern (never the
+  query string), status, bytes and duration. The request ID matches the `X-Request-ID` response
+  header and the `request_id` in the JSON body.
+- `audit_log.request_id` and `actor_user_id` existed in the schema since M1, but nothing wrote
+  them: 0 of 457 rows had either. They are now filled from the request context.
+- A transcode can now be followed from the click to the worker: `X-Request-ID` → the
+  `job_created` audit row → the job id → the worker's log lines, which carry `job`, `clip`,
+  `attempt` and `output_version`. The queue entry stays a bare job id, because Redis holds no
+  truth.
+
+**Run it locally.**
+
+```bash
+make up                                  # nginx with the cookie check, MinIO restricted to nginx
+K=clips/<id>/hls/<version>/master.m3u8   # any hls clip's live master
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8081/goalstream/$K   # 403
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9010/goalstream/$K   # 403 (MinIO direct)
+# pass the gate in the app (make api, make fe): HLS clips play, every :8081 request is 200
+make verify-hls                          # probes through nginx with a cookie it signs
+```
+
+**What I learned.** _(to write in my own words)_
+
+**What I chose not to build, and when that choice would be wrong.**
+
+| Not built | Would be wrong when |
+|---|---|
+| The production version: an owned domain (`app.`, `media.`), a private R2 bucket reachable only through Cloudflare Access with a service token added by the edge, a `Domain`-scoped invite cookie, and a deployed worker | real viewers need adaptive streaming in production. Today production serves MP4 only (D11) |
+| A signed URL or token per segment | the cookie cannot reach the media host (another site with no shared domain). Until then a token only splits the cache |
+| An API `auth_request` per segment | access depends on per-user state the cookie does not carry (subscriptions, per-clip rights). Today it would add one API call per segment |
+| Closing the forwarded-header bypass of the MinIO policy | MinIO is reachable from anything other than this machine, or an untrusted process runs here |
+| A cookie check on presigned originals | the 15-minute presign gap stops being acceptable (plan §17) |
+| DRM, or per-viewer watermarking | the content's owner requires it. The NDA requires access control, not copy protection |
+| Correlating logs across services (a trace ID through Redis to the worker) | jobs fan out across services, or a job's log lines cannot be found from its id. Today the audit row joins them |

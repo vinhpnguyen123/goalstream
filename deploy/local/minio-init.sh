@@ -1,9 +1,10 @@
 #!/bin/sh
 # One-shot init for local MinIO: create the app and test buckets, private except for one
-# LOCAL-ONLY policy (IMPLEMENTATION_PLAN §8): anonymous GET on clips/*/hls/*. Only the HLS master
-# is presigned; the player resolves renditions and segments relative to it and the signature does
-# not carry over, so those requests are unsigned. Originals stay private (presigned only), MinIO
-# binds 127.0.0.1, and this policy is NEVER applied to R2 — Phase B is never deployed.
+# LOCAL-ONLY policy (IMPLEMENTATION_PLAN §8): anonymous GET on clips/*/hls/*, and since M9 only
+# from nginx's address (172.30.0.10, fixed in docker-compose.yml). The player's relative
+# requests carry no signature; they reach MinIO only through nginx. Originals stay private
+# (presigned only), MinIO binds 127.0.0.1, and this policy is NEVER applied to R2 — Phase B is
+# never deployed.
 set -eu
 # MinIO has no healthcheck (no curl in its image), and `mc alias set` already contacts the
 # server — so the alias itself is the readiness probe, retried for up to ~60s.

@@ -2,11 +2,12 @@
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "LocalAnonymousReadOfHLSOnly",
+      "Sid": "LocalAnonymousReadOfHLSOnlyFromNginx",
       "Effect": "Allow",
       "Principal": {"AWS": ["*"]},
       "Action": ["s3:GetObject"],
-      "Resource": ["arn:aws:s3:::BUCKET/clips/*/hls/*"]
+      "Resource": ["arn:aws:s3:::BUCKET/clips/*/hls/*"],
+      "Condition": {"IpAddress": {"aws:SourceIp": ["172.30.0.10/32"]}}
     }
   ]
 }

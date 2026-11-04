@@ -278,7 +278,20 @@ func verifyHLS(ctx context.Context, cfg config.Config) error {
 		return err
 	}
 	defer pool.Close()
-	r, err := transcode.Verify(ctx, pool, storage.New(cfg.S3))
+	if cfg.API.HLSBaseURL == "" { // M9: MinIO serves hls/ unsigned only to nginx
+		return errors.New("verify-hls probes through the nginx cache: set HLS_BASE_URL (make up)")
+	}
+	// M9: nginx admits only a valid invite cookie. Sign one, as the API's gate would; it
+	// outlives a full run (~1 min for the catalogue) with room to spare.
+	var cookie string
+	for id := range cfg.API.InviteCodes {
+		cookie = auth.InviteCookie + "=" + auth.SignInvite(cfg.API.InviteSecret, id, time.Now().Add(time.Hour))
+		break
+	}
+	if cookie == "" || len(cfg.API.InviteSecret) < 32 {
+		return errors.New("verify-hls signs an invite cookie for nginx: set INVITE_CODES and INVITE_SECRET")
+	}
+	r, err := transcode.Verify(ctx, pool, storage.New(cfg.S3), cfg.API.HLSBaseURL+"/"+cfg.S3.Bucket, cookie)
 	if err != nil {
 		return err
 	}

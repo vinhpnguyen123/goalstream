@@ -36,7 +36,9 @@ clip clip_1080p.mp4 1920x1080 5000000 yes   # → 4 rungs
 clip clip_720p_low.mp4 1280x720 1500000 yes # → 3 rungs
 clip clip_576p.mp4 1024x576 1500000 yes     # → 2 rungs, starts at 480p (§10 example D)
 clip clip_noaudio.mp4 640x360 800000 no     # → terminal no_audio_stream
-[[ -f testdata/clip_corrupt.mp4 ]] || head -c 4096 /dev/urandom > testdata/clip_corrupt.mp4 # → probe fails
+# → probe fails. Zeros, not random bytes: ffprobe 6.1 (CI's Ubuntu) accepts ~0.5% of random 4 KiB
+# files as LRC lyrics (a subtitle stream, exit 0), which turns probe_failed into no_video_stream.
+head -c 4096 /dev/zero > testdata/clip_corrupt.mp4
 
 if [[ -f "$OUT/.complete" ]]; then
   echo "fixtures already present (use --force to regenerate)"

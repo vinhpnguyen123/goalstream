@@ -7,6 +7,10 @@ import (
 	"fmt"
 	"net/http"
 	"runtime/debug"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	chimw "github.com/go-chi/chi/v5/middleware"
 
 	"github.com/vinhpnguyen123/goalstream/internal/httpx"
 )
@@ -23,6 +27,29 @@ func RequestID(next http.Handler) http.Handler {
 		id := hex.EncodeToString(b)
 		w.Header().Set("X-Request-ID", id)
 		next.ServeHTTP(w, r.WithContext(httpx.WithRequestID(r.Context(), id)))
+	})
+}
+
+// RequestLog writes one line per request, after it is answered: request_id, method, the chi
+// route pattern (/api/v1/clips/{id}/play — never the raw path's query string), status, bytes
+// and duration. Headers, cookies and query strings are never logged: they carry the invite,
+// tokens, and on other routes cursors. Placed right after RequestID, so it also sees the 500
+// that Recover writes for a panic.
+func RequestLog(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		ww := chimw.NewWrapResponseWriter(w, r.ProtoMajor)
+		next.ServeHTTP(ww, r)
+		route := "unmatched"
+		if rc := chi.RouteContext(r.Context()); rc != nil && rc.RoutePattern() != "" {
+			route = rc.RoutePattern()
+		}
+		status := ww.Status()
+		if status == 0 {
+			status = http.StatusOK // the handler wrote nothing
+		}
+		httpx.Log(r.Context()).Info("request", "method", r.Method, "route", route, "status", status,
+			"bytes", ww.BytesWritten(), "duration_ms", time.Since(start).Milliseconds())
 	})
 }
 

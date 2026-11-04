@@ -10,7 +10,7 @@ import (
 	"github.com/vinhpnguyen123/goalstream/internal/httpx"
 )
 
-// RequireAdmin is docs/API.md step 8. It reads users.is_admin from Postgres on EVERY request
+// RequireAdmin is docs/API.md step 9. It reads users.is_admin from Postgres on EVERY request
 // instead of trusting a claim in the access token, so a demotion takes effect on the very next
 // request rather than when the token expires. A caller who is not an admin — or no longer
 // exists — gets the same 404 as a route that does not exist: admin routes are not discoverable.
