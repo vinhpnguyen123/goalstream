@@ -1,5 +1,6 @@
+import type { LoaderContext } from 'hls.js'
 import { describe, expect, it } from 'vitest'
-import { addExclude, chooseEngine, loadHls, MAX_EXCLUDE, onMediaError } from './playback'
+import { addExclude, chooseEngine, HLS_CONFIG, loadHls, MAX_EXCLUDE, onMediaError } from './playback'
 
 describe('onMediaError', () => {
   const exp = '2026-10-20T10:00:00Z'
@@ -62,5 +63,16 @@ describe('loadHls', () => {
   it('returns the class when the chunk loads', async () => {
     const Fake = class {} as never
     await expect(loadHls(() => Promise.resolve({ default: Fake }))).resolves.toBe(Fake)
+  })
+})
+
+describe('HLS_CONFIG', () => {
+  it('sends the invite cookie on every hls.js request (nginx is another origin)', () => {
+    const xhr = { withCredentials: false } as XMLHttpRequest
+    HLS_CONFIG.xhrSetup?.(xhr, 'http://localhost:8081/b/clips/c/hls/v/360p/seg_00000.ts', {} as LoaderContext)
+    expect(xhr.withCredentials).toBe(true)
+  })
+  it('starts at the rung the bandwidth allows', () => {
+    expect(HLS_CONFIG.startLevel).toBe(-1)
   })
 })

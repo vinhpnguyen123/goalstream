@@ -37,7 +37,7 @@ type Server struct {
 func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
 	byIP := middleware.ByIP(s.Cfg.API.ClientIPHeader)
-	r.Use(middleware.RequestID, middleware.Recover, middleware.LimitBody,
+	r.Use(middleware.RequestID, middleware.RequestLog, middleware.Recover, middleware.LimitBody,
 		middleware.RateLimit(s.Redis, middleware.RuleDefault, byIP))
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, http.StatusNotFound, "not_found", "not found")

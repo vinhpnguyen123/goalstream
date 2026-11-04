@@ -1,6 +1,7 @@
 // Player decisions as pure functions, so they are tested without a browser (plan §8).
 
 import type Hls from 'hls.js'
+import type { HlsConfig } from 'hls.js'
 
 export type ErrorAction = 'represign' | 'fallback' | 'skip'
 
@@ -14,6 +15,19 @@ export async function loadHls(importer: () => Promise<{ default: typeof Hls }> =
   } catch {
     return null
   }
+}
+
+// HLS_CONFIG is what Player hands hls.js.
+// startLevel -1: start from the rung the measured bandwidth allows (hls.js loads the lowest
+// rung's first segment to measure), not the first rung in the master (720p). Measured
+// 2026-11-01 on Slow 4G: starting at 720p cost a whole 1.5 MB segment before the first
+// frame — TTFF p50 9.6 s vs 3.1 s for MP4.
+// withCredentials (M9): nginx on :8081 admits hls/ only with the gs_invite cookie, and :8081 is
+// another origin than the app's :5173 — without it the browser drops the cookie, every request
+// is 403, and every clip falls back to mp4. Native HLS (Safari) sends same-site cookies itself.
+export const HLS_CONFIG: Partial<HlsConfig> = {
+  startLevel: -1,
+  xhrSetup: (xhr) => { xhr.withCredentials = true },
 }
 
 export type Engine = 'hlsjs' | 'native' | 'src'
